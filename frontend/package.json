@@ -1,0 +1,27 @@
+{
+  "name": "the-orbit-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test src/utils/weekends.test.js src/utils/singleSubmission.test.js src/utils/times.test.js src/utils/weeklyUpdate.test.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "date-fns": "^4.1.0",
+    "gsap": "^3.13.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.3.3",
+    "vite": "^6.0.5"
+  }
+}
