@@ -1,17 +1,18 @@
-import { Route, Routes } from 'react-router-dom'
-import { ThemeProvider } from './hooks/ThemeContext.jsx'
-import { HomePage } from './pages/HomePage.jsx'
-import { CommunityPage } from './pages/CommunityPage.jsx'
-import { EventDetailPage } from './pages/EventDetailPage.jsx'
-import { NotFoundPage } from './pages/NotFoundPage.jsx'
-import { AdminLoginPage } from './pages/admin/AdminLoginPage.jsx'
-import { AdminLayout } from './pages/admin/AdminLayout.jsx'
-import { AdminDashboardPage } from './pages/admin/AdminDashboardPage.jsx'
-import { AdminEventsPage } from './pages/admin/AdminEventsPage.jsx'
-import { AdminImportPage } from './pages/admin/AdminImportPage.jsx'
-import { AdminEventEditorPage } from './pages/admin/AdminEventEditorPage.jsx'
-import { AdminSettingsPage } from './pages/admin/AdminSettingsPage.jsx'
-import { AdminWeeklyUpdatePage } from './pages/admin/AdminWeeklyUpdatePage.jsx'
+import { Route, Routes } from "react-router-dom";
+import { ThemeProvider } from "./hooks/ThemeContext.jsx";
+import { HomePage } from "./pages/HomePage.jsx";
+import { CommunityPage } from "./pages/CommunityPage.jsx";
+import { EventDetailPage } from "./pages/EventDetailPage.jsx";
+import { NotFoundPage } from "./pages/NotFoundPage.jsx";
+import { AdminLoginPage } from "./pages/admin/AdminLoginPage.jsx";
+import { AdminLayout } from "./pages/admin/AdminLayout.jsx";
+import { AdminDashboardPage } from "./pages/admin/AdminDashboardPage.jsx";
+import { AdminEventsPage } from "./pages/admin/AdminEventsPage.jsx";
+import { AdminImportPage } from "./pages/admin/AdminImportPage.jsx";
+import { AdminEventEditorPage } from "./pages/admin/AdminEventEditorPage.jsx";
+import { AdminSettingsPage } from "./pages/admin/AdminSettingsPage.jsx";
+import { AdminWeeklyUpdatePage } from "./pages/admin/AdminWeeklyUpdatePage.jsx";
+import ResetPassword from "./pages/ResetPassword";
 
 export default function App() {
   return (
@@ -29,8 +30,9 @@ export default function App() {
           <Route path="settings" element={<AdminSettingsPage />} />
           <Route path="events/:id/edit" element={<AdminEventEditorPage />} />
         </Route>
+        <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </ThemeProvider>
-  )
+  );
 }
