@@ -14,6 +14,17 @@ export function AdminLoginPage() {
   const [resetMessage, setResetMessage] = useState("");
 
   useEffect(() => {
+    const previousTitle = document.title;
+    document.title = "Admin sign in | ORBIT";
+    const robots = document.querySelector('meta[name="robots"]');
+    const previousContent = robots?.content
+    if (robots) robots.setAttribute('content', 'noindex, nofollow')
+    else {
+      const tag = document.createElement('meta')
+      tag.name = 'robots'
+      tag.content = 'noindex, nofollow'
+      document.head.appendChild(tag)
+    }
     try {
       const supabase = getSupabaseClient();
       supabase.auth.getSession().then(({ data }) => {
@@ -21,6 +32,12 @@ export function AdminLoginPage() {
       });
     } catch {
       setConfigured(false);
+    }
+    return () => {
+      document.title = previousTitle;
+      const tag = document.querySelector('meta[name="robots"]')
+      if (previousContent != null) tag?.setAttribute('content', previousContent)
+      else tag?.remove()
     }
   }, [navigate]);
 
@@ -76,16 +93,9 @@ export function AdminLoginPage() {
   return (
     <main className="admin-login-page">
       <div className="admin-login-aside">
-        <Link to="/" className="wordmark">
-          <span className="wordmark-symbol" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span>the orbit</span>
-        </Link>
+        <Link to="/" className="wordmark">ORBIT</Link>
         <div>
-          <span className="admin-eyebrow">THE ORBIT · OPERATIONS</span>
+          <span className="admin-eyebrow">ORBIT / OPERATIONS</span>
           <h1>
             Gather the
             <br />

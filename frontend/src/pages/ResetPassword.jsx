@@ -14,6 +14,17 @@ export default function ResetPassword() {
 
   useEffect(() => {
     let active = true;
+    const previousTitle = document.title;
+    document.title = "Reset administrator password | ORBIT";
+    const robots = document.querySelector('meta[name="robots"]');
+    const previousRobots = robots?.content;
+    if (robots) robots.setAttribute("content", "noindex, nofollow");
+    else {
+      const tag = document.createElement("meta");
+      tag.name = "robots";
+      tag.content = "noindex, nofollow";
+      document.head.appendChild(tag);
+    }
 
     async function verifyRecoverySession() {
       const { data, error } = await getSupabaseClient().auth.getSession();
@@ -35,6 +46,10 @@ export default function ResetPassword() {
 
     return () => {
       active = false;
+      document.title = previousTitle;
+      const tag = document.querySelector('meta[name="robots"]');
+      if (previousRobots != null) tag?.setAttribute("content", previousRobots);
+      else tag?.remove();
     };
   }, []);
 
@@ -74,42 +89,40 @@ export default function ResetPassword() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-[#f8f7f3] px-5 py-12">
-      <section className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-7 shadow-sm sm:p-9">
-        <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">
-          The Orbit · Account Recovery
-        </p>
+    <main className="reset-password-page">
+      <section className="reset-password-card">
+        <a href="/" className="wordmark" aria-label="ORBIT home">
+          ORBIT
+        </a>
+        <p className="reset-password-eyebrow">Account recovery</p>
 
-        <h1 className="text-3xl font-semibold tracking-tight text-neutral-900">
-          Set a new password<span className="text-orange-500">.</span>
-        </h1>
+        <h1>Set a new password<span>.</span></h1>
 
-        <p className="mt-3 text-sm leading-6 text-neutral-500">
+        <p className="reset-password-intro">
           Choose a new password for your administrator account.
         </p>
 
         {loading ? (
-          <p className="mt-7 text-sm text-neutral-500">
+          <p className="reset-password-message" role="status">
             Verifying your recovery link...
           </p>
         ) : !ready ? (
-          <div className="mt-6">
-            <p className="text-sm leading-6 text-red-600">{message}</p>
+          <div className="reset-password-message">
+            <p role="alert">{message}</p>
 
             <button
               type="button"
               onClick={() => navigate("/admin")}
-              className="mt-5 w-full rounded-xl bg-neutral-900 px-4 py-3 text-sm font-medium text-white transition hover:bg-neutral-700"
+              className="reset-password-submit"
             >
               Return to login
             </button>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="mt-7 space-y-5">
+          <form onSubmit={handleSubmit} className="reset-password-form">
             <div>
               <label
                 htmlFor="new-password"
-                className="mb-2 block text-sm font-medium text-neutral-700"
               >
                 New password
               </label>
@@ -122,7 +135,6 @@ export default function ResetPassword() {
                 minLength={8}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                className="w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
                 placeholder="At least 8 characters"
               />
             </div>
@@ -130,7 +142,6 @@ export default function ResetPassword() {
             <div>
               <label
                 htmlFor="confirm-password"
-                className="mb-2 block text-sm font-medium text-neutral-700"
               >
                 Confirm new password
               </label>
@@ -143,13 +154,12 @@ export default function ResetPassword() {
                 minLength={8}
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
-                className="w-full rounded-xl border border-neutral-200 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
                 placeholder="Enter password again"
               />
             </div>
 
             {message && (
-              <p role="status" className="text-sm leading-5 text-neutral-600">
+              <p role="status" className="reset-password-message">
                 {message}
               </p>
             )}
@@ -157,7 +167,7 @@ export default function ResetPassword() {
             <button
               type="submit"
               disabled={saving}
-              className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="reset-password-submit"
             >
               {saving ? "Updating password..." : "Update password"}
             </button>

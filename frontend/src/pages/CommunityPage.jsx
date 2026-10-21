@@ -1,5 +1,7 @@
 import { ArrowUpRight, Instagram, Linkedin, MessageCircle } from 'lucide-react'
+import { useEffect } from 'react'
 import { SiteHeader } from '../components/SiteHeader.jsx'
+import { SiteFooter } from '../components/SiteFooter.jsx'
 
 const channels = [
   {
@@ -61,15 +63,34 @@ function SocialButton({ channel }) {
 }
 
 export function CommunityPage() {
+  useEffect(() => {
+    const previousTitle = document.title
+    document.title = 'ORBIT Community | Hyderabad'
+    return () => { document.title = previousTitle }
+  }, [])
+
   return (
     <main className="community-page">
-      <SiteHeader />
-      <section className="community-stage" aria-label="Community links">
-        <h1 className="sr-only">The Orbit community</h1>
-        <ul className="community-socials">
-          {channels.map((channel) => <SocialButton key={channel.name} channel={channel} />)}
-        </ul>
-      </section>
+      <div className="page-shell">
+        <SiteHeader />
+        <section className="community-stage" aria-labelledby="community-title">
+          <div className="community-intro">
+            <p className="section-eyebrow">THE LOCAL NETWORK</p>
+            <h1 id="community-title">Good ideas<br />travel <em>together.</em></h1>
+            <p>Stay close to the people and gatherings shaping Hyderabad&apos;s technology community.</p>
+          </div>
+          <div className="community-channel-panel">
+            <div className="community-channel-heading">
+              <span>FOLLOW ORBIT</span>
+              <span>OFFICIAL CHANNELS</span>
+            </div>
+            <ul className="community-socials">
+              {channels.map((channel) => <SocialButton key={channel.name} channel={channel} />)}
+            </ul>
+          </div>
+        </section>
+      </div>
+      <SiteFooter />
     </main>
   )
 }

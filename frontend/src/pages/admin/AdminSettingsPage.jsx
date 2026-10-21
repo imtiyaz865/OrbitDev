@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Download, LoaderCircle, Mail, Moon, Sun } from 'lucide-react'
-import { useTheme } from '../../hooks/ThemeContext.jsx'
+import { Download, LoaderCircle, Mail } from 'lucide-react'
 import { adminApi } from '../../services/adminApi.js'
 
 export function AdminSettingsPage() {
-  const { theme, setTheme } = useTheme()
   const [integrations, setIntegrations] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -59,13 +57,6 @@ export function AdminSettingsPage() {
       <div className="admin-page-heading">
         <div><h1>Settings</h1></div>
       </div>
-      <section className="settings-section" aria-labelledby="appearance-heading">
-        <div><h2 id="appearance-heading">Appearance</h2><p>Saved on this device.</p></div>
-        <div className="theme-options" role="group" aria-label="Color theme">
-          <button className={theme === 'light' ? 'is-selected' : ''} onClick={() => setTheme('light')} aria-pressed={theme === 'light'}><Sun size={16} />Light</button>
-          <button className={theme === 'dark' ? 'is-selected' : ''} onClick={() => setTheme('dark')} aria-pressed={theme === 'dark'}><Moon size={16} />Dark</button>
-        </div>
-      </section>
       {error && <div className="admin-alert" role="alert">{error}</div>}
       {notice && <div className="admin-success-message" role="status">{notice}</div>}
       <section className="settings-section settings-report-section" aria-labelledby="data-heading">

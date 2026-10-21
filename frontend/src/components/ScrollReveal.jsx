@@ -1,8 +1,4 @@
 import { useEffect, useRef } from 'react'
-import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
-
-gsap.registerPlugin(ScrollTrigger)
 
 export function ScrollReveal({ children, className = '', delay = 0, staggerSelector, as: Element = 'div', ...elementProps }) {
   const ref = useRef(null)
@@ -11,27 +7,35 @@ export function ScrollReveal({ children, className = '', delay = 0, staggerSelec
     const node = ref.current
     if (!node || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
 
-    const context = gsap.context(() => {
-      const targets = staggerSelector ? node.querySelectorAll(staggerSelector) : node
-      gsap.fromTo(targets,
-        { autoAlpha: 0, y: staggerSelector ? 16 : 22 },
-        {
-          autoAlpha: 1,
-          y: 0,
-          duration: staggerSelector ? 0.55 : 0.72,
-          delay,
-          stagger: staggerSelector ? 0.08 : 0,
-          ease: 'power2.out',
-          scrollTrigger: {
-            trigger: node,
-            start: 'top 90%',
-            toggleActions: 'play none none reverse',
-            invalidateOnRefresh: true,
-          },
-        })
-    }, node)
-    return () => context.revert()
+    const targets = staggerSelector ? [...node.querySelectorAll(staggerSelector)] : [node]
+    if (!('IntersectionObserver' in window)) {
+      targets.forEach((target) => target.classList.add('is-revealed'))
+      return
+    }
+
+    let timer
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      observer.disconnect()
+      targets.forEach((target, index) => {
+        target.style.setProperty('--reveal-delay', `${delay + (staggerSelector ? index * 80 : 0)}ms`)
+        target.classList.add('is-revealed')
+      })
+      timer = window.setTimeout(() => {
+        targets.forEach((target) => target.style.removeProperty('--reveal-delay'))
+      }, delay + (staggerSelector ? targets.length * 80 : 0) + 500)
+    }, { threshold: 0.08 })
+
+    observer.observe(node)
+    return () => {
+      observer.disconnect()
+      window.clearTimeout(timer)
+      targets.forEach((target) => {
+        target.classList.remove('is-revealed')
+        target.style.removeProperty('--reveal-delay')
+      })
+    }
   }, [delay, staggerSelector])
 
-  return <Element {...elementProps} ref={ref} className={className}>{children}</Element>
+  return <Element {...elementProps} ref={ref} className={`scroll-reveal ${className}`.trim()}>{children}</Element>
 }

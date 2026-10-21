@@ -1,13 +1,16 @@
-import { Link, useLocation } from 'react-router-dom'
 import { useEffect, useRef, useState } from 'react'
-import { Moon, Sun } from 'lucide-react'
-import { useTheme } from '../hooks/ThemeContext.jsx'
+import { ArrowUpRight, Menu, Moon, Sun, X } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
+import { useColorScheme, useTouchFirstDevice } from '../contexts/ColorSchemeContext.jsx'
 
 export function SiteHeader() {
-  const { theme, toggleTheme } = useTheme()
   const location = useLocation()
   const [isScrolled, setIsScrolled] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const isScrolledRef = useRef(false)
+  const { scheme, toggleScheme } = useColorScheme()
+  const isTouchFirst = useTouchFirstDevice()
+  const nextScheme = scheme === 'dark' ? 'light' : 'dark'
 
   useEffect(() => {
     const updateScrollState = () => {
@@ -22,20 +25,54 @@ export function SiteHeader() {
     return () => window.removeEventListener('scroll', updateScrollState)
   }, [location.pathname])
 
+  useEffect(() => setMenuOpen(false), [location.pathname, location.hash])
+
   return (
     <header className={`site-header${isScrolled ? ' is-scrolled' : ''}`}>
       <div className="site-header-inner">
-        <Link to="/" className="wordmark" aria-label="The Orbit home">
-          <span>the orbit</span>
-        </Link>
-        <nav className="main-nav" aria-label="Main navigation">
-          <Link to="/#weekend-list" className={`nav-link${location.pathname === '/' ? ' nav-link-active' : ''}`}>
-            Weekend events
+        <Link to="/" className="wordmark" aria-label="ORBIT home">ORBIT</Link>
+        <nav id="public-navigation" className={`main-nav${menuOpen ? ' is-open' : ''}`} aria-label="Main navigation">
+          <Link
+            to="/"
+            className={`nav-link${location.pathname === '/' ? ' nav-link-active' : ''}`}
+            aria-current={location.pathname === '/' ? 'page' : undefined}
+          >
+            Home
           </Link>
+          <Link
+            to="/#weekend-list"
+            className="nav-link"
+          >
+            Events
+          </Link>
+          <Link to="/community" className="mobile-create-link">Join us <ArrowUpRight size={16} /></Link>
         </nav>
-        <button className="theme-button" onClick={toggleTheme} aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}>
-          {theme === 'light' ? <Moon size={17} strokeWidth={1.7} /> : <Sun size={17} strokeWidth={1.7} />}
-        </button>
+        <div className="site-header-actions">
+          {isTouchFirst && (
+            <button
+              className="theme-toggle"
+              type="button"
+              onClick={toggleScheme}
+              aria-label={`Switch to ${nextScheme} mode`}
+              aria-pressed={scheme === 'dark'}
+              title={`Switch to ${nextScheme} mode`}
+            >
+              {scheme === 'dark' ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
+              <span>{scheme === 'dark' ? 'Dark' : 'Light'}</span>
+            </button>
+          )}
+          <Link to="/community" className="create-event-link">Join us</Link>
+          <button
+            className="mobile-nav-toggle"
+            type="button"
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-controls="public-navigation"
+            aria-expanded={menuOpen}
+          >
+            {menuOpen ? <X size={19} /> : <Menu size={19} />}
+          </button>
+        </div>
       </div>
     </header>
   )

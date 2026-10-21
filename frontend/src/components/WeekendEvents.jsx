@@ -1,17 +1,16 @@
 import { format } from 'date-fns'
 import { localDateString } from '../utils/weekends.js'
 import { EventCard } from './EventCard.jsx'
-import { ScrollReveal } from './ScrollReveal.jsx'
 
 function eventDate(event) {
   return event.start_date || event.start_at?.slice(0, 10) || ''
 }
 
-function EventGrid({ events, startIndex = 0 }) {
+function EventGrid({ events }) {
   return (
     <div className="day-events">
       {events.map((event, index) => (
-        <EventCard event={event} index={startIndex + index} key={event.id || event.slug} />
+        <EventCard event={event} key={event.id || event.slug} />
       ))}
     </div>
   )
@@ -37,28 +36,25 @@ export function WeekendEvents({ events, weekend }) {
         const untimed = dayEvents.filter((event) => !event.start_time)
         return (
           <section className="day-section" key={day.date} aria-labelledby={`day-${day.date}`}>
-            <ScrollReveal className="day-heading">
+            <header className="day-heading">
               <div className="day-heading-copy">
                 <span className="day-name" id={`day-${day.date}`}>{day.label}</span>
                 <span className="day-date">{format(day.dateObject, 'd MMMM')}</span>
               </div>
-              <span className="day-count">
-                {String(dayEvents.length).padStart(2, '0')}
-                <small>{dayEvents.length === 1 ? 'event' : 'events'}</small>
-              </span>
-            </ScrollReveal>
+              <span className="day-count">{dayEvents.length} {dayEvents.length === 1 ? 'event' : 'events'}</span>
+            </header>
             {dayEvents.length === 0 ? (
               <p className="day-empty">A little room for something unexpected.</p>
             ) : (
-              <ScrollReveal className="day-collection" staggerSelector=".event-card">
+              <div className="day-collection">
                 <EventGrid events={timed} />
                 {untimed.length > 0 && (
                   <div className="unconfirmed-group">
                     <p className="unconfirmed-label">Time to be confirmed</p>
-                    <EventGrid events={untimed} startIndex={timed.length} />
+                    <EventGrid events={untimed} />
                   </div>
                 )}
-              </ScrollReveal>
+              </div>
             )}
           </section>
         )
