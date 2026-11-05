@@ -2,8 +2,11 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { getSupabaseClient } from "../../services/supabase.js";
+import "../../styles/admin.css";
+import { useSeo } from '../../seo/useSeo.js';
 
 export function AdminLoginPage() {
+  useSeo({ title: 'Admin sign in · The Orbit', robots: 'noindex, nofollow' })
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -77,12 +80,8 @@ export function AdminLoginPage() {
     <main className="admin-login-page">
       <div className="admin-login-aside">
         <Link to="/" className="wordmark">
-          <span className="wordmark-symbol" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span>the orbit</span>
+          <span className="admin-mark" aria-hidden="true"><img className="admin-mark-light" src="/brand/orbit-mark-light.png" alt="" /><img className="admin-mark-dark" src="/brand/orbit-mark-dark.png" alt="" /></span>
+          <span>The Orbit</span>
         </Link>
         <div>
           <span className="admin-eyebrow">THE ORBIT · OPERATIONS</span>

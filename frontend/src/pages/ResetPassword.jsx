@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getSupabaseClient } from "../services/supabase.js";
+import "../styles/admin.css";
+import { useSeo } from '../seo/useSeo.js';
 
 export default function ResetPassword() {
+  useSeo({ title: 'Reset password · The Orbit', robots: 'noindex, nofollow' })
   const navigate = useNavigate();
 
   const [password, setPassword] = useState("");

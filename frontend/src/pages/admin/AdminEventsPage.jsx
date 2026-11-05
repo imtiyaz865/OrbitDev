@@ -130,7 +130,7 @@ export function AdminEventsPage() {
         </div>
         {visibleEvents.map((event) => showDeleted ? (
           <article className="event-library-row is-deleted" key={event.id}>
-            {event.banner_url ? <img className="library-event-image" src={event.banner_url} alt="" /> : <span className="library-event-image library-event-image-empty"><Ticket size={16} /></span>}
+            {event.banner_url ? <img className="library-event-image" src={event.banner_url} alt="" loading="lazy" decoding="async" /> : <span className="library-event-image library-event-image-empty"><Ticket size={16} /></span>}
             <div className="library-event-title"><strong>{event.name}</strong><small>{event.event_type || event.source_platform || 'Event'} · <Status status={event.status} /></small></div>
             <span className="library-event-date">{displayDate(event.deleted_at)}<small>{recoveryDays(event.deleted_at)} days remaining</small></span>
             <div className="trash-event-actions">
@@ -140,7 +140,7 @@ export function AdminEventsPage() {
           </article>
         ) : (
           <article className="event-library-row" key={event.id}>
-            {event.banner_url ? <img className="library-event-image" src={event.banner_url} alt="" /> : <span className="library-event-image library-event-image-empty"><Ticket size={16} /></span>}
+            {event.banner_url ? <img className="library-event-image" src={event.banner_url} alt="" loading="lazy" decoding="async" /> : <span className="library-event-image library-event-image-empty"><Ticket size={16} /></span>}
             <div className="library-event-title"><Link to={`/admin/events/${event.id}/edit`}>{event.name}</Link><small>{event.event_type || event.source_platform || 'Event'}</small></div>
             <span className="library-event-date">{displayDate(event.start_date)}{event.start_time && <small>{formatEventTimeInIndia(event)}</small>}</span>
             <span className="library-event-organizer">{event.organizer_name || 'Not specified'}</span>

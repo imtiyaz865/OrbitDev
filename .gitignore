@@ -19,3 +19,6 @@ build/
 
 .vercel/
 .DS_Store
+
+# Local-only public event fixtures; the tracked example documents the shape.
+frontend/src/mocks/events.mock.local.js

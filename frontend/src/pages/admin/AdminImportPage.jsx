@@ -272,7 +272,7 @@ export function AdminImportPage({ manual = false }) {
             <Field label="Original banner URL" className="field-full"><input type="url" value={event.original_banner_url || ''} onChange={(e) => update('original_banner_url', e.target.value)} /></Field>
             <Field label="Banner image URL to display" className="field-full"><input type="url" value={event.banner_url || ''} onChange={(e) => { update('banner_url', e.target.value); setImageFailed(false) }} /></Field>
           </div>
-          {event.banner_url && <div className="banner-preview">{imageFailed ? <div><ImagePlus size={19} /><span>Preview unavailable. Check the image URL.</span></div> : <img src={event.banner_url} alt="Event banner preview" onError={() => setImageFailed(true)} />}<button type="button" onClick={() => update('banner_url', '')}><Trash2 size={13} /> Remove image</button></div>}
+          {event.banner_url && <div className="banner-preview">{imageFailed ? <div><ImagePlus size={19} /><span>Preview unavailable. Check the image URL.</span></div> : <img src={event.banner_url} alt="Event banner preview" decoding="async" onError={() => setImageFailed(true)} />}<button type="button" onClick={() => update('banner_url', '')}><Trash2 size={13} /> Remove image</button></div>}
           </section>
 
           <section className="form-section"><SectionHead letter="J" title="Source & verification" status={event.verification_status === 'verified' ? 'Verified' : 'Needs review'} /><div className="form-grid">
@@ -285,7 +285,7 @@ export function AdminImportPage({ manual = false }) {
         <aside className="event-form-aside">
           <div className="event-form-sticky">
             <span className="admin-eyebrow">PUBLIC PREVIEW</span>
-            {event.banner_url && !imageFailed ? <img className="aside-banner" src={event.banner_url} alt="" onError={() => setImageFailed(true)} /> : <div className="aside-banner aside-banner-empty"><ImagePlus size={20} /><span>Event image</span></div>}
+            {event.banner_url && !imageFailed ? <img className="aside-banner" src={event.banner_url} alt="" decoding="async" onError={() => setImageFailed(true)} /> : <div className="aside-banner aside-banner-empty"><ImagePlus size={20} /><span>Event image</span></div>}
             <h3>{event.name || 'Your event title'}</h3>
             <p>{event.start_date || 'Date to be confirmed'}{event.start_time ? ` · ${format12HourTime(event.start_time)}` : ''}</p>
             <p>{event.event_type || 'Event type'}{event.organizer_name ? ` · ${event.organizer_name}` : ''}</p>
@@ -326,7 +326,7 @@ function PreviewModal({ event, onClose }) {
     <div className="event-preview-overlay" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <section className="event-preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
         <div className="event-preview-top"><span className="admin-eyebrow">PUBLIC EVENT PREVIEW</span><button type="button" onClick={onClose} aria-label="Close preview">×</button></div>
-        {event.banner_url && <img className="event-preview-banner" src={event.banner_url} alt="" />}
+        {event.banner_url && <img className="event-preview-banner" src={event.banner_url} alt="" loading="lazy" decoding="async" />}
         <p className="section-eyebrow"><span className="kicker-line" />{event.event_type || 'COMMUNITY EVENT'}</p>
         <h2 id="preview-title">{event.name || 'Your event title'}</h2>
         <div className="event-preview-facts"><span>{event.start_date || 'Date to be confirmed'}{event.start_time ? ` · ${format12HourTime(event.start_time)}` : ' · Time to be confirmed'}</span>{event.organizer_name && <span>Organized by {event.organizer_name}</span>}{(event.venue_name || event.city) && <span>{[event.venue_name, event.city].filter(Boolean).join(', ')}</span>}</div>

@@ -1,64 +1,58 @@
 import { format } from 'date-fns'
 import { localDateString } from '../utils/weekends.js'
 import { EventCard } from './EventCard.jsx'
-import { ScrollReveal } from './ScrollReveal.jsx'
 
 function eventDate(event) {
   return event.start_date || event.start_at?.slice(0, 10) || ''
 }
 
-function EventGrid({ events, startIndex = 0 }) {
+function EventGrid({ events }) {
   return (
-    <div className="day-events">
-      {events.map((event, index) => (
-        <EventCard event={event} index={startIndex + index} key={event.id || event.slug} />
-      ))}
+    <div className="o-grid">
+      {events.map((event) => <EventCard event={event} key={event.id || event.slug} />)}
     </div>
   )
 }
 
 export function WeekendEvents({ events, weekend }) {
-  const saturday = localDateString(weekend.start)
-  const sunday = localDateString(weekend.end)
   const days = [
-    { date: saturday, label: 'Saturday', dateObject: weekend.start },
-    { date: sunday, label: 'Sunday', dateObject: weekend.end },
+    { date: localDateString(weekend.start), label: 'Saturday', dateObject: weekend.start },
+    { date: localDateString(weekend.end), label: 'Sunday', dateObject: weekend.end },
   ]
-  const sorted = [...events].sort((a, b) => {
-    const dateOrder = eventDate(a).localeCompare(eventDate(b))
-    return dateOrder || (a.start_time || '99:99').localeCompare(b.start_time || '99:99')
-  })
+  const sorted = [...events].sort((a, b) => (
+    eventDate(a).localeCompare(eventDate(b))
+    || (a.start_time || '99:99').localeCompare(b.start_time || '99:99')
+  ))
 
   return (
-    <div className="weekend-groups">
+    <div className="o-days">
       {days.map((day) => {
         const dayEvents = sorted.filter((event) => eventDate(event) === day.date)
-        const timed = dayEvents.filter((event) => event.start_time)
-        const untimed = dayEvents.filter((event) => !event.start_time)
+        const timed = dayEvents.filter((event) => event.start_time || event.start_at)
+        const untimed = dayEvents.filter((event) => !event.start_time && !event.start_at)
         return (
-          <section className="day-section" key={day.date} aria-labelledby={`day-${day.date}`}>
-            <ScrollReveal className="day-heading">
-              <div className="day-heading-copy">
-                <span className="day-name" id={`day-${day.date}`}>{day.label}</span>
-                <span className="day-date">{format(day.dateObject, 'd MMMM')}</span>
-              </div>
-              <span className="day-count">
-                {String(dayEvents.length).padStart(2, '0')}
-                <small>{dayEvents.length === 1 ? 'event' : 'events'}</small>
+          <section className="o-day" key={day.date} aria-labelledby={`day-${day.date}`}>
+            <header className="o-day-head">
+              <h3 id={`day-${day.date}`}>
+                {day.label}
+                <span>{format(day.dateObject, 'd MMMM')}</span>
+              </h3>
+              <span className="o-day-count">
+                {dayEvents.length} {dayEvents.length === 1 ? 'event' : 'events'}
               </span>
-            </ScrollReveal>
+            </header>
             {dayEvents.length === 0 ? (
-              <p className="day-empty">A little room for something unexpected.</p>
+              <p className="o-day-empty">No events listed for {day.label} yet.</p>
             ) : (
-              <ScrollReveal className="day-collection" staggerSelector=".event-card">
-                <EventGrid events={timed} />
+              <div className="o-day-body">
+                {timed.length > 0 && <EventGrid events={timed} />}
                 {untimed.length > 0 && (
-                  <div className="unconfirmed-group">
-                    <p className="unconfirmed-label">Time to be confirmed</p>
-                    <EventGrid events={untimed} startIndex={timed.length} />
+                  <div className="o-day-untimed">
+                    <p className="o-label">Time to be announced</p>
+                    <EventGrid events={untimed} />
                   </div>
                 )}
-              </ScrollReveal>
+              </div>
             )}
           </section>
         )

@@ -351,7 +351,7 @@ export function AdminDashboardPage() {
       {eventsError && <div className="admin-alert" role="alert">The recent event list could not be refreshed: {eventsError}</div>}
       {events.length ? <div className="recent-events" role="list">
         {events.map((event) => <article className="recent-event-row" role="listitem" key={event.id}>
-          {event.banner_url ? <img className="recent-event-image" src={event.banner_url} alt="" /> : <span className="recent-event-image recent-event-image-empty"><Ticket size={16} /></span>}
+          {event.banner_url ? <img className="recent-event-image" src={event.banner_url} alt="" loading="lazy" decoding="async" /> : <span className="recent-event-image recent-event-image-empty"><Ticket size={16} /></span>}
           <div className="recent-event-main"><Link to={`/admin/events/${event.id}/edit`}>{event.name}</Link><span>{event.organizer_name || 'Organizer not specified'}</span></div>
           <span className="recent-event-date">{event.start_date || 'Date TBD'}</span>
           <span className={`admin-status status-${event.status || 'draft'}`}><i />{event.status || 'draft'}</span>

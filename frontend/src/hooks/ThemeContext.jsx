@@ -6,7 +6,7 @@ export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {
     const stored = localStorage.getItem('orbit-theme')
     if (stored === 'light' || stored === 'dark') return stored
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    return 'dark'
   })
 
   useEffect(() => {
@@ -14,7 +14,7 @@ export function ThemeProvider({ children }) {
     localStorage.setItem('orbit-theme', theme)
     document.querySelector('meta[name="theme-color"]')?.setAttribute(
       'content',
-      theme === 'dark' ? '#101114' : '#f7f7f2',
+      theme === 'dark' ? '#000000' : '#F5F3EE',
     )
   }, [theme])
 

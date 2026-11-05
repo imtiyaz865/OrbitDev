@@ -17,10 +17,25 @@ async function request(path, options = {}) {
   return payload.data ?? payload
 }
 
+function getDevelopmentEvents() {
+  if (!import.meta.env.DEV) return Promise.reject(new Error('Local event data is only available in development.'))
+  return import('./developmentEvents.js')
+}
+
 export const api = {
-  getWeekendEvents: (start, end, signal) => request(
-    `/events/weekends?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
-    { signal },
-  ),
-  getEvent: (slug, signal) => request(`/events/${encodeURIComponent(slug)}`, { signal }),
+  getWeekendEvents: (start, end, signal) => {
+    if (import.meta.env.DEV) {
+      return getDevelopmentEvents().then(({ getWeekendEvents }) => getWeekendEvents(start, end, signal))
+    }
+    return request(
+      `/events/weekends?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+      { signal },
+    )
+  },
+  getEvent: (slug, signal) => {
+    if (import.meta.env.DEV) {
+      return getDevelopmentEvents().then(({ getEvent }) => getEvent(slug, signal))
+    }
+    return request(`/events/${encodeURIComponent(slug)}`, { signal })
+  },
 }

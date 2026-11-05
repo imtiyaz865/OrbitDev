@@ -193,7 +193,7 @@ export function AdminEventEditorPage() {
           <div className="editor-banner-field">
             <label className="admin-field">Banner image URL<input type="url" value={event.banner_url || ''} onChange={(inputEvent) => updateField('banner_url', inputEvent.target.value)} /></label>
             {event.banner_url
-              ? <img className="editor-banner-preview" src={event.banner_url} alt={`${event.name || 'Event'} banner preview`} onError={(imageEvent) => { imageEvent.currentTarget.hidden = true }} />
+              ? <img className="editor-banner-preview" src={event.banner_url} alt={`${event.name || 'Event'} banner preview`} decoding="async" onError={(imageEvent) => { imageEvent.currentTarget.hidden = true }} />
               : <div className="editor-banner-empty"><ImageIcon size={18} /><span>Banner preview</span></div>}
           </div>
         </section>
