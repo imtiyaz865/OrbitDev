@@ -56,7 +56,7 @@ The database `events` record is the primary event model. Public event-list respo
 
 The public weekend API currently returns a subset (identity, event type, start/end schedule, timezone, organizer name, and banner). The detail API returns richer event fields, including description and registration/speaker/sponsor/agenda details. The redesign must not assume that a card has detail-only fields or that a public community directory endpoint exists.
 
-During Vite development only, `api.js` loads the gitignored `frontend/src/mocks/events.mock.local.js` fixture through `developmentEvents.js`; weekend and slug lookups preserve the same list/detail projections as the public API. Copy `events.mock.example.js` to create the local fixture. Production builds use the live API exclusively and tree-shake the development loader and fixture.
+Public event listings and event details use the existing API in every environment. The frontend does not substitute local fixture data when the API is unavailable; the public pages retain their loading, empty, and error states.
 
 ## Current route composition
 
