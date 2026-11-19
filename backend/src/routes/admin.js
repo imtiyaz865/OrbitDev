@@ -8,7 +8,16 @@ import { recordUntitledImport } from '../services/failedImport.js'
 import { emailConfiguration, fetchAllEvents, sendImmediateEventReport } from '../services/monthlyReports.js'
 import { geminiConfiguration } from '../services/geminiResearch.js'
 import { getSupabase } from '../services/supabase.js'
+import { duplicateMessage, findDuplicateEvents } from '../services/duplicateDetection.js'
 import { sendError } from '../utils/httpError.js'
+import {
+  LIST_COLUMNS,
+  RECOVERY_PERIOD_MS,
+  indiaDayFilter,
+  indiaToday,
+  listParams,
+  splitRange,
+} from '../services/adminListing.js'
 
 export const adminRouter = Router()
 adminRouter.use(requireOwner)
@@ -19,23 +28,27 @@ adminRouter.param('id', (request, response, next, id) => {
   return next()
 })
 
+function duplicateConflict(response, duplicates) {
+  return response.status(409).json({ error: { message: duplicateMessage(duplicates), code: 'duplicate_event', duplicates } })
+}
+
 adminRouter.post('/import', async (request, response) => {
   try {
     const schema = z.object({
       url: z.string().url().max(2048),
       update_existing: z.boolean().optional(),
+      // Set after the administrator confirms that a flagged match is a different event.
+      allow_duplicate: z.boolean().optional(),
     })
     const parsed = schema.safeParse(request.body)
     if (!parsed.success) return response.status(400).json({ error: { message: 'Enter a valid source URL.' } })
 
     const supabase = getSupabase()
-    const { data: duplicate, error: duplicateError } = await supabase.from('events')
-      .select('*')
-      .eq('source_url', parsed.data.url)
-      .maybeSingle()
-    if (duplicateError) throw duplicateError
-    if (duplicate && !parsed.data.update_existing) {
-      return response.json({ data: { duplicate, research: { status: 'skipped_duplicate' } } })
+    // Same source page (normalised URL), across drafts and published events.
+    const sourceDuplicates = await findDuplicateEvents(supabase, { source_url: parsed.data.url })
+    const duplicate = sourceDuplicates[0] || null
+    if (duplicate && !parsed.data.update_existing && !parsed.data.allow_duplicate) {
+      return response.json({ data: { duplicate, duplicates: sourceDuplicates, research: { status: 'skipped_duplicate' } } })
     }
     if (parsed.data.update_existing && !duplicate) {
       return response.status(404).json({ error: { message: 'No existing event uses this source URL.' } })
@@ -50,7 +63,38 @@ adminRouter.post('/import', async (request, response) => {
         extraction: result,
       })
     }
-    return response.json({ data: { ...result, duplicate } })
+    // Same event under another URL: title, date, start time and organizer.
+    let duplicates = sourceDuplicates
+    try {
+      duplicates = await findDuplicateEvents(supabase, { ...result.fields, source_url: parsed.data.url })
+    } catch (error) {
+      console.warn('Duplicate check after extraction failed:', error.message)
+      result.warnings = [...(result.warnings || []), { field: 'duplicates', message: 'The duplicate check could not be completed. Search the event list before publishing.' }]
+    }
+    // `duplicate` keeps its original meaning (same source page, the record "update existing"
+    // refreshes); `duplicates` lists every match, including the same event under another URL.
+    return response.json({ data: { ...result, duplicate: duplicates.find(({ match }) => match === 'source_url') || null, duplicates } })
+  } catch (error) {
+    return sendError(response, error)
+  }
+})
+
+const duplicateCheckSchema = z.object({
+  name: z.string().max(240).nullable().optional(),
+  start_date: z.string().date().nullable().optional().or(z.literal('')),
+  start_time: z.string().max(16).nullable().optional(),
+  organizer_name: z.string().max(500).nullable().optional(),
+  source_url: z.string().max(2048).nullable().optional(),
+  exclude_id: z.string().uuid().nullable().optional(),
+})
+
+adminRouter.post('/events/check-duplicates', async (request, response) => {
+  try {
+    const parsed = duplicateCheckSchema.safeParse(request.body)
+    if (!parsed.success) return response.status(400).json({ error: { message: 'Provide an event name, date or source URL to check.' } })
+    const { exclude_id: excludeId, ...candidate } = parsed.data
+    const duplicates = await findDuplicateEvents(getSupabase(), candidate, { excludeId })
+    return response.json({ data: { duplicates } })
   } catch (error) {
     return sendError(response, error)
   }
@@ -88,17 +132,54 @@ adminRouter.get('/dashboard', async (_request, response) => {
 
 adminRouter.get('/events', async (request, response) => {
   try {
-    const page = Math.max(1, Number(request.query.page) || 1)
-    const pageSize = Math.min(100, Math.max(1, Number(request.query.page_size) || 20))
+    const params = listParams(request.query)
+    if (params.error) return response.status(400).json({ error: { message: params.error } })
+    const { page, pageSize, status, search, sort, direction, date } = params
     const from = (page - 1) * pageSize
-    let query = getSupabase().from('events').select('*', { count: 'exact' }).is('deleted_at', null)
-    if (request.query.status) query = query.eq('status', request.query.status)
-    if (request.query.search) query = query.ilike('name', `%${String(request.query.search).replace(/[%_]/g, '')}%`)
+    const to = from + pageSize - 1
+    const supabase = getSupabase()
+    const base = (columns, options) => {
+      let query = supabase.from('events').select(columns, options).is('deleted_at', null)
+      if (status) query = query.eq('status', status)
+      if (search) query = query.ilike('name', `%${search}%`)
+      if (date) query = query.or(indiaDayFilter(date))
+      return query
+    }
+
+    // With a single-day filter there is nothing to split into upcoming/past, so the
+    // plain ordering below applies (by time of day for the date sort).
+    if (sort === 'date' && direction === 'asc' && !date) {
+      // "Upcoming first": events from today (IST) onwards, soonest first; then past
+      // events, most recent first; then events without a date. Paged across both groups.
+      const today = indiaToday()
+      const upcoming = () => base(LIST_COLUMNS).gte('start_date', today)
+      const past = () => base(LIST_COLUMNS).or(`start_date.lt.${today},start_date.is.null`)
+      const [upcomingCount, pastCount] = await Promise.all([
+        base('id', { count: 'exact', head: true }).gte('start_date', today),
+        base('id', { count: 'exact', head: true }).or(`start_date.lt.${today},start_date.is.null`),
+      ])
+      for (const result of [upcomingCount, pastCount]) if (result.error) throw result.error
+      const ranges = splitRange(from, to, upcomingCount.count || 0)
+      const [upcomingRows, pastRows] = await Promise.all([
+        ranges.upcoming
+          ? upcoming().order('start_date', { ascending: true }).order('start_time', { ascending: true, nullsFirst: false }).order('id').range(...ranges.upcoming)
+          : { data: [] },
+        ranges.past
+          ? past().order('start_date', { ascending: false, nullsFirst: false }).order('start_time', { ascending: false, nullsFirst: false }).order('id').range(...ranges.past)
+          : { data: [] },
+      ])
+      for (const result of [upcomingRows, pastRows]) if (result.error) throw result.error
+      const total = (upcomingCount.count || 0) + (pastCount.count || 0)
+      return response.json({ data: { events: [...(upcomingRows.data || []), ...(pastRows.data || [])], total, page, page_size: pageSize } })
+    }
+
     const sortColumns = { updated: 'updated_at', date: 'start_date', name: 'name' }
-    const sortColumn = sortColumns[request.query.sort] || 'updated_at'
-    const { data, error, count } = await query.order(sortColumn, { ascending: request.query.direction === 'asc', nullsFirst: false }).range(from, from + pageSize - 1)
+    let listQuery = base(LIST_COLUMNS, { count: 'exact' })
+      .order(sortColumns[sort], { ascending: direction === 'asc', nullsFirst: false })
+    if (sort === 'date') listQuery = listQuery.order('start_time', { ascending: direction === 'asc', nullsFirst: false })
+    const { data, error, count } = await listQuery.order('id').range(from, to)
     if (error) throw error
-    return response.json({ data: { events: data, total: count || 0, page, page_size: pageSize } })
+    return response.json({ data: { events: data || [], total: count || 0, page, page_size: pageSize } })
   } catch (error) {
     return sendError(response, error)
   }
@@ -106,15 +187,16 @@ adminRouter.get('/events', async (request, response) => {
 
 adminRouter.get('/events/deleted', async (request, response) => {
   try {
-    const page = Math.max(1, Number(request.query.page) || 1)
-    const pageSize = Math.min(100, Math.max(1, Number(request.query.page_size) || 20))
+    const params = listParams(request.query)
+    if (params.error) return response.status(400).json({ error: { message: params.error } })
+    const { page, pageSize, search } = params
     const from = (page - 1) * pageSize
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    let query = getSupabase().from('events').select('*', { count: 'exact' })
+    const cutoff = new Date(Date.now() - RECOVERY_PERIOD_MS).toISOString()
+    let query = getSupabase().from('events').select(LIST_COLUMNS, { count: 'exact' })
       .not('deleted_at', 'is', null)
       .gte('deleted_at', cutoff)
-    if (request.query.search) query = query.ilike('name', `%${String(request.query.search).replace(/[%_]/g, '')}%`)
-    const { data, error, count } = await query.order('deleted_at', { ascending: false }).range(from, from + pageSize - 1)
+    if (search) query = query.ilike('name', `%${search}%`)
+    const { data, error, count } = await query.order('deleted_at', { ascending: false }).order('id').range(from, from + pageSize - 1)
     if (error) throw error
     return response.json({ data: { events: data || [], total: count || 0, page, page_size: pageSize } })
   } catch (error) {
@@ -144,7 +226,13 @@ adminRouter.post('/events', async (request, response) => {
     const prepared = prepareEventUpdate({}, fields)
     if (prepared.error) return response.status(422).json({ error: { message: prepared.error } })
     Object.assign(fields, prepared.updates)
-    const { data, error } = await getSupabase().from('events').insert(fields).select().single()
+    const supabase = getSupabase()
+    // Never create a second copy silently; the administrator can confirm and retry.
+    if (request.body?.allow_duplicate !== true) {
+      const duplicates = await findDuplicateEvents(supabase, fields)
+      if (duplicates.length) return duplicateConflict(response, duplicates)
+    }
+    const { data, error } = await supabase.from('events').insert(fields).select().single()
     if (error) throw error
     return response.status(201).json({ data })
   } catch (error) {
@@ -189,6 +277,11 @@ async function setEventStatus(request, response, status) {
     if (!event) return response.status(404).json({ error: { message: 'Event not found.' } })
     const validation = prepareEventUpdate(event, { status })
     if (validation.error) return response.status(422).json({ error: { message: validation.error } })
+    // Publishing a second live copy of an event needs explicit confirmation.
+    if (status === 'published' && event.status !== 'published' && request.body?.allow_duplicate !== true) {
+      const duplicates = await findDuplicateEvents(getSupabase(), event, { excludeId: event.id, statuses: ['published'] })
+      if (duplicates.length) return duplicateConflict(response, duplicates)
+    }
     const { data, error } = await getSupabase().from('events')
       .update({ status, updated_at: new Date().toISOString() })
       .eq('id', request.params.id).is('deleted_at', null).select().single()
@@ -204,12 +297,9 @@ adminRouter.post('/events/:id/unpublish', (request, response) => setEventStatus(
 
 adminRouter.delete('/events/:id', async (request, response) => {
   try {
+    // The RPC only deletes an active event (atomically), so call it first and
+    // read the row only to explain why nothing was deleted.
     const supabase = getSupabase()
-    const { data: current, error: readError } = await supabase.from('events')
-      .select('id,deleted_at').eq('id', request.params.id).maybeSingle()
-    if (readError) throw readError
-    if (!current) return response.status(404).json({ error: { message: 'Event not found.' } })
-    if (current.deleted_at) return response.status(409).json({ error: { message: 'This event is already in Recently Deleted.' } })
     const { data, error } = await supabase.rpc('soft_delete_event', {
       p_event_id: request.params.id,
       p_actor_id: request.owner.id,
@@ -217,8 +307,13 @@ adminRouter.delete('/events/:id', async (request, response) => {
     })
     if (error) throw error
     const event = Array.isArray(data) ? data[0] : data
-    if (!event) return response.status(409).json({ error: { message: 'The event changed before it could be deleted. Refresh the list and try again.' } })
-    return response.json({ data: event })
+    if (event) return response.json({ data: event })
+    const { data: current, error: readError } = await supabase.from('events')
+      .select('id,deleted_at').eq('id', request.params.id).maybeSingle()
+    if (readError) throw readError
+    if (!current) return response.status(404).json({ error: { message: 'Event not found.' } })
+    if (current.deleted_at) return response.status(409).json({ error: { message: 'This event is already in Recently Deleted.' } })
+    return response.status(409).json({ error: { message: 'The event changed before it could be deleted. Refresh the list and try again.' } })
   } catch (error) {
     return sendError(response, error)
   }
@@ -226,15 +321,9 @@ adminRouter.delete('/events/:id', async (request, response) => {
 
 adminRouter.post('/events/:id/restore', async (request, response) => {
   try {
+    // The RPC only restores a deleted event inside the recovery window (atomically),
+    // so call it first and read the row only to explain a refusal.
     const supabase = getSupabase()
-    const { data: current, error: readError } = await supabase.from('events')
-      .select('id,deleted_at').eq('id', request.params.id).maybeSingle()
-    if (readError) throw readError
-    if (!current) return response.status(404).json({ error: { message: 'Event not found.' } })
-    if (!current.deleted_at) return response.status(409).json({ error: { message: 'This event is already active.' } })
-    if (Date.parse(current.deleted_at) < Date.now() - 30 * 24 * 60 * 60 * 1000) {
-      return response.status(410).json({ error: { message: 'The 30-day recovery period has expired.' } })
-    }
     const { data, error } = await supabase.rpc('restore_event', {
       p_event_id: request.params.id,
       p_actor_id: request.owner.id,
@@ -242,8 +331,13 @@ adminRouter.post('/events/:id/restore', async (request, response) => {
     })
     if (error) throw error
     const event = Array.isArray(data) ? data[0] : data
-    if (!event) return response.status(410).json({ error: { message: 'The recovery period expired before this event could be restored.' } })
-    return response.json({ data: event })
+    if (event) return response.json({ data: event })
+    const { data: current, error: readError } = await supabase.from('events')
+      .select('id,deleted_at').eq('id', request.params.id).maybeSingle()
+    if (readError) throw readError
+    if (!current) return response.status(404).json({ error: { message: 'Event not found.' } })
+    if (!current.deleted_at) return response.status(409).json({ error: { message: 'This event is already active.' } })
+    return response.status(410).json({ error: { message: 'The 30-day recovery period has expired.' } })
   } catch (error) {
     return sendError(response, error)
   }

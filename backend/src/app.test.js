@@ -116,17 +116,74 @@ before(async () => {
     }
 
     let matchingEvents = [...events.values()]
-    const status = url.searchParams.get('status')?.replace(/^eq\./, '')
+    const statusIn = url.searchParams.get('status')?.match(/^in\.\((.*)\)$/)
+    if (statusIn) matchingEvents = matchingEvents.filter((event) => statusIn[1].split(',').includes(event.status))
+    const status = statusIn ? null : url.searchParams.get('status')?.replace(/^eq\./, '')
     const slug = url.searchParams.get('slug')?.replace(/^eq\./, '')
-    const deletedAt = url.searchParams.get('deleted_at')
-    if (deletedAt === 'is.null') matchingEvents = matchingEvents.filter((event) => event.deleted_at == null)
-    if (deletedAt === 'not.is.null') matchingEvents = matchingEvents.filter((event) => event.deleted_at != null)
+    const deletedAtFilters = url.searchParams.getAll('deleted_at')
+    if (deletedAtFilters.includes('is.null')) matchingEvents = matchingEvents.filter((event) => event.deleted_at == null)
+    if (deletedAtFilters.includes('not.is.null')) matchingEvents = matchingEvents.filter((event) => event.deleted_at != null)
     const sourceUrl = url.searchParams.get('source_url')?.replace(/^eq\./, '')
-    if (id) matchingEvents = matchingEvents.filter((event) => event.id === id)
+    if (id?.startsWith('neq.')) matchingEvents = matchingEvents.filter((event) => event.id !== id.slice(4))
+    else if (id) matchingEvents = matchingEvents.filter((event) => event.id === id)
+    const sourceLike = url.searchParams.get('source_url')?.match(/^ilike\.[*%](.*)[*%]$/)
+    if (sourceLike) matchingEvents = matchingEvents.filter((event) => String(event.source_url || '').toLowerCase().includes(sourceLike[1].toLowerCase()))
     if (status) matchingEvents = matchingEvents.filter((event) => event.status === status)
     if (slug) matchingEvents = matchingEvents.filter((event) => event.slug === slug)
-    if (sourceUrl) matchingEvents = matchingEvents.filter((event) => event.source_url === sourceUrl)
+    if (sourceUrl && !sourceLike) matchingEvents = matchingEvents.filter((event) => event.source_url === sourceUrl)
+    for (const startDate of url.searchParams.getAll('start_date')) {
+      if (startDate.startsWith('gte.')) matchingEvents = matchingEvents.filter((event) => event.start_date && event.start_date >= startDate.slice(4))
+      if (startDate.startsWith('lte.')) matchingEvents = matchingEvents.filter((event) => event.start_date && event.start_date <= startDate.slice(4))
+    }
+    const startDateOr = url.searchParams.get('or')?.match(/^\(start_date\.lt\.([\d-]+),start_date\.is\.null\)$/)
+    if (startDateOr) matchingEvents = matchingEvents.filter((event) => !event.start_date || event.start_date < startDateOr[1])
+    const dayOr = url.searchParams.get('or')?.match(/^\(and\(start_at\.gte\.([^,]+),start_at\.lt\.([^)]+)\),and\(start_at\.is\.null,start_date\.eq\.([\d-]+)\)\)$/)
+    if (dayOr) {
+      const [, from, to, day] = dayOr
+      matchingEvents = matchingEvents.filter((event) => (event.start_at
+        ? Date.parse(event.start_at) >= Date.parse(from) && Date.parse(event.start_at) < Date.parse(to)
+        : event.start_date === day))
+    }
+    const nameSearch = url.searchParams.get('name')?.match(/^ilike\.[*%](.*)[*%]$/)
+    if (nameSearch) matchingEvents = matchingEvents.filter((event) => String(event.name || '').toLowerCase().includes(nameSearch[1].toLowerCase()))
+
+    // PostgREST-style ordering: "col.asc|desc[.nullsfirst|.nullslast]" entries, comma separated.
+    const orderKeys = (url.searchParams.get('order') || '').split(',').filter(Boolean).map((entry) => {
+      const [column, direction = 'asc', nulls] = entry.split('.')
+      return { column, descending: direction === 'desc', nullsFirst: nulls ? nulls === 'nullsfirst' : direction === 'desc' }
+    })
+    matchingEvents.sort((a, b) => {
+      for (const { column, descending, nullsFirst } of orderKeys) {
+        const left = a[column] ?? null
+        const right = b[column] ?? null
+        if (left === right) continue
+        if (left === null) return nullsFirst ? -1 : 1
+        if (right === null) return nullsFirst ? 1 : -1
+        return (left < right ? -1 : 1) * (descending ? -1 : 1)
+      }
+      return 0
+    })
+
+    const total = matchingEvents.length
+    const offset = Number(url.searchParams.get('offset') || 0)
+    const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Infinity
+    matchingEvents = matchingEvents.slice(offset, offset + limit)
+    const select = url.searchParams.get('select')
+    if (select && select !== '*') {
+      const columns = select.split(',')
+      matchingEvents = matchingEvents.map((event) => Object.fromEntries(columns.map((column) => [column, event[column] ?? null])))
+    }
+    if (request.headers.prefer?.includes('count=exact')) {
+      response.setHeader('Content-Range', `${matchingEvents.length ? `${offset}-${offset + matchingEvents.length - 1}` : '*'}/${total}`)
+    }
+    if (request.method === 'HEAD') {
+      response.writeHead(200)
+      return response.end()
+    }
     if (request.headers.accept?.includes('vnd.pgrst.object+json')) {
+      if (matchingEvents.length > 1) {
+        return respond(response, 406, { code: 'PGRST116', message: 'JSON object requested, multiple (or no) rows returned' })
+      }
       return matchingEvents[0]
         ? respond(response, 200, matchingEvents[0])
         : respond(response, 406, { code: 'PGRST116', message: 'Event not found' })
@@ -390,7 +447,8 @@ test('owner can create a draft and publish it using the verified access token', 
 
   const publicResponse = await fetch(`${baseUrl}/api/events/${created.slug}`)
   assert.equal(publicResponse.status, 200)
-  assert.equal((await publicResponse.json()).data.status, 'published')
+  // The public detail endpoint never selects `status`; it only serves published rows.
+  assert.equal((await publicResponse.json()).data.slug, created.slug)
   const publishedEditResponse = await fetch(`${baseUrl}/api/admin/events/${created.id}`, {
     method: 'PATCH',
     headers,
@@ -642,4 +700,262 @@ test('import failures are returned without creating an event', async () => {
   assert.equal(response.status, 400)
   assert.match((await response.json()).error.message, /Private and reserved/)
   assert.equal(events.size, eventCount)
+})
+
+test('CORS preflights for allowed origins are cacheable and other origins stay rejected', async () => {
+  const allowed = await fetch(`${baseUrl}/api/admin/events`, {
+    method: 'OPTIONS',
+    headers: { Origin: 'http://localhost:5173', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization' },
+  })
+  assert.equal(allowed.status, 204)
+  assert.equal(allowed.headers.get('access-control-max-age'), '600')
+  assert.equal(allowed.headers.get('access-control-allow-origin'), 'http://localhost:5173')
+  const blocked = await fetch(`${baseUrl}/api/admin/events`, {
+    method: 'OPTIONS',
+    headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'GET' },
+  })
+  assert.equal(blocked.status, 403)
+})
+
+test('admin list returns only list columns and rejects unsupported status, sort and direction', async () => {
+  const headers = { Authorization: 'Bearer owner-token' }
+  const list = await fetch(`${baseUrl}/api/admin/events?page_size=50`, { headers })
+  assert.equal(list.status, 200)
+  const body = (await list.json()).data
+  assert.ok(body.events.length > 0)
+  assert.equal(body.total, body.events.length)
+  for (const event of body.events) {
+    assert.ok('name' in event && 'status' in event && 'start_date' in event)
+    assert.equal('description' in event, false)
+    assert.equal('extraction_metadata' in event, false)
+  }
+  for (const query of ['status=bogus', 'sort=bogus', 'direction=sideways']) {
+    const rejected = await fetch(`${baseUrl}/api/admin/events?${query}`, { headers })
+    assert.equal(rejected.status, 400, query)
+    assert.ok((await rejected.json()).error.message)
+  }
+})
+
+test('event date ascending lists upcoming events soonest first, then past events, across pages', async () => {
+  const headers = { Authorization: 'Bearer owner-token' }
+  const fixtures = [
+    ['30000000-0000-4000-8000-000000000001', 'sort-upcoming-later', '2099-02-01'],
+    ['30000000-0000-4000-8000-000000000002', 'sort-upcoming-soon', '2099-01-01'],
+    ['30000000-0000-4000-8000-000000000003', 'sort-past-recent', '2020-06-01'],
+    ['30000000-0000-4000-8000-000000000004', 'sort-past-old', '2020-01-01'],
+  ]
+  for (const [id, slug, date] of fixtures) {
+    events.set(id, { id, slug, name: `Sortcheck ${slug}`, start_date: date, timezone: 'Asia/Kolkata', status: 'draft', deleted_at: null, description: 'Detail only' })
+  }
+  try {
+    const page = async (number) => (await (await fetch(`${baseUrl}/api/admin/events?search=Sortcheck&sort=date&direction=asc&page_size=3&page=${number}`, { headers })).json()).data
+    const first = await page(1)
+    const second = await page(2)
+    assert.equal(first.total, 4)
+    assert.equal(second.total, 4)
+    assert.deepEqual(
+      [...first.events, ...second.events].map((event) => event.slug),
+      ['sort-upcoming-soon', 'sort-upcoming-later', 'sort-past-recent', 'sort-past-old'],
+    )
+    const descending = (await (await fetch(`${baseUrl}/api/admin/events?search=Sortcheck&sort=date&direction=desc`, { headers })).json()).data
+    assert.deepEqual(descending.events.map((event) => event.slug), ['sort-upcoming-later', 'sort-upcoming-soon', 'sort-past-recent', 'sort-past-old'])
+  } finally {
+    for (const [id] of fixtures) events.delete(id)
+  }
+})
+
+test('Recently Deleted can return just its count with one projected row', async () => {
+  const headers = { Authorization: 'Bearer owner-token' }
+  const ids = ['40000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000002']
+  for (const id of ids) {
+    events.set(id, { id, slug: `deleted-${id}`, name: 'Deleted count check', status: 'draft', deleted_at: new Date().toISOString(), description: 'Detail only' })
+  }
+  try {
+    const response = await fetch(`${baseUrl}/api/admin/events/deleted?page_size=1&search=Deleted%20count`, { headers })
+    assert.equal(response.status, 200)
+    const body = (await response.json()).data
+    assert.equal(body.total, 2)
+    assert.equal(body.events.length, 1)
+    assert.equal('description' in body.events[0], false)
+  } finally {
+    for (const id of ids) events.delete(id)
+  }
+})
+
+test('import duplicate detection tolerates several events with the same source URL and prefers the active one', async () => {
+  const sourceUrl = 'https://events.example.com/shared-source'
+  const deletedId = '50000000-0000-4000-8000-000000000001'
+  const activeId = '50000000-0000-4000-8000-000000000002'
+  events.set(deletedId, { id: deletedId, slug: 'dup-deleted', name: 'Deleted copy', source_url: sourceUrl, status: 'draft', deleted_at: new Date().toISOString(), updated_at: '2026-11-10T00:00:00.000Z' })
+  events.set(activeId, { id: activeId, slug: 'dup-active', name: 'Active copy', source_url: sourceUrl, status: 'published', deleted_at: null, updated_at: '2026-11-01T00:00:00.000Z' })
+  try {
+    const response = await fetch(`${baseUrl}/api/admin/import`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: sourceUrl }),
+    })
+    assert.equal(response.status, 200)
+    const body = (await response.json()).data
+    assert.equal(body.duplicate.id, activeId)
+    assert.equal(body.research.status, 'skipped_duplicate')
+  } finally {
+    events.delete(deletedId)
+    events.delete(activeId)
+  }
+})
+
+test('deleting and restoring still report missing, already-deleted and active events precisely', async () => {
+  const headers = { Authorization: 'Bearer owner-token' }
+  const missing = '60000000-0000-4000-8000-000000000001'
+  assert.equal((await fetch(`${baseUrl}/api/admin/events/${missing}`, { method: 'DELETE', headers })).status, 404)
+  assert.equal((await fetch(`${baseUrl}/api/admin/events/${missing}/restore`, { method: 'POST', headers })).status, 404)
+  const id = '60000000-0000-4000-8000-000000000002'
+  events.set(id, { id, slug: 'delete-twice', name: 'Delete twice', status: 'draft', deleted_at: null })
+  try {
+    assert.equal((await fetch(`${baseUrl}/api/admin/events/${id}/restore`, { method: 'POST', headers })).status, 409)
+    assert.equal((await fetch(`${baseUrl}/api/admin/events/${id}`, { method: 'DELETE', headers })).status, 200)
+    assert.equal((await fetch(`${baseUrl}/api/admin/events/${id}`, { method: 'DELETE', headers })).status, 409)
+  } finally {
+    events.delete(id)
+  }
+})
+
+test('date filter returns events on that Asia/Kolkata day and works with search, status and paging', async () => {
+  const headers = { Authorization: 'Bearer owner-token' }
+  const fixtures = [
+    // 23:30 IST on 14 Nov is 18:00 UTC on 14 Nov: same IST day.
+    ['70000000-0000-4000-8000-000000000001', 'Daycheck late', '2026-11-14', '2026-11-14T18:00:00.000Z', 'published'],
+    // 00:30 IST on 15 Nov is 19:00 UTC on 14 Nov: next IST day, must be excluded.
+    ['70000000-0000-4000-8000-000000000002', 'Daycheck next', '2026-11-15', '2026-11-14T19:00:00.000Z', 'published'],
+    ['70000000-0000-4000-8000-000000000003', 'Daycheck no time', '2026-11-14', null, 'draft'],
+    ['70000000-0000-4000-8000-000000000004', 'Daycheck other', '2026-11-20', '2026-11-20T04:30:00.000Z', 'published'],
+  ]
+  for (const [id, name, date, startAt, status] of fixtures) {
+    events.set(id, { id, slug: id, name, start_date: date, start_at: startAt, timezone: 'Asia/Kolkata', status, deleted_at: null })
+  }
+  try {
+    const list = async (query) => (await (await fetch(`${baseUrl}/api/admin/events?search=Daycheck&${query}`, { headers })).json()).data
+    const day = await list('date=2026-11-14&sort=date&direction=asc')
+    assert.deepEqual(day.events.map((event) => event.name).sort(), ['Daycheck late', 'Daycheck no time'])
+    assert.equal(day.total, 2)
+    assert.deepEqual((await list('date=2026-11-14&status=published')).events.map((event) => event.name), ['Daycheck late'])
+    const paged = await list('date=2026-11-14&page_size=1&page=2&sort=name&direction=asc')
+    assert.equal(paged.total, 2)
+    assert.deepEqual(paged.events.map((event) => event.name), ['Daycheck no time'])
+    const invalid = await fetch(`${baseUrl}/api/admin/events?date=2026-13-01`, { headers })
+    assert.equal(invalid.status, 400)
+  } finally {
+    for (const [id] of fixtures) events.delete(id)
+  }
+})
+
+test('duplicate detection: imports of an existing published event or draft are stopped before extraction', async () => {
+  const headers = { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' }
+  const publishedId = '60000000-0000-4000-8000-000000000001'
+  const draftId = '60000000-0000-4000-8000-000000000002'
+  events.set(publishedId, { id: publishedId, slug: 'ai-night', name: 'AI Night Hyderabad', source_url: 'https://lu.ma/ai-night', status: 'published', start_date: '2026-12-05', deleted_at: null })
+  events.set(draftId, { id: draftId, slug: 'rust-meetup', name: 'Rust Meetup', source_url: 'https://www.meetup.com/rust-hyd/events/301234567/', status: 'draft', start_date: '2026-12-06', deleted_at: null })
+  try {
+    // A tracking-parameter / domain-alias variant of the published event's URL.
+    const published = await fetch(`${baseUrl}/api/admin/import`, { method: 'POST', headers, body: JSON.stringify({ url: 'https://luma.com/ai-night?utm_source=whatsapp' }) })
+    const publishedBody = (await published.json()).data
+    assert.equal(publishedBody.research.status, 'skipped_duplicate')
+    assert.equal(publishedBody.duplicate.id, publishedId)
+    assert.equal(publishedBody.duplicates[0].match, 'source_url')
+    assert.equal(publishedBody.duplicates[0].status, 'published')
+
+    const draft = await fetch(`${baseUrl}/api/admin/import`, { method: 'POST', headers, body: JSON.stringify({ url: 'https://meetup.com/rust-hyd/events/301234567?eventOrigin=home' }) })
+    const draftBody = (await draft.json()).data
+    assert.equal(draftBody.duplicate.id, draftId)
+    assert.equal(draftBody.duplicate.status, 'draft')
+  } finally {
+    events.delete(publishedId)
+    events.delete(draftId)
+  }
+})
+
+test('duplicate detection: manual creation is refused with the match, and allowed after confirmation', async () => {
+  const headers = { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' }
+  const existingId = '60000000-0000-4000-8000-000000000003'
+  events.set(existingId, { id: existingId, slug: 'k8s-workshop', name: 'Kubernetes Workshop Hyderabad', status: 'draft', start_date: '2026-12-12', start_time: '10:00', organizer_name: 'CNCF Hyderabad', deleted_at: null })
+  const payload = { name: 'Kubernetes Workshop – Hyderabad', slug: 'k8s-workshop-copy', start_date: '2026-12-12', start_time: '10:30', organizer_name: 'CNCF Hyderabad', extraction_status: 'manual' }
+  try {
+    const refused = await fetch(`${baseUrl}/api/admin/events`, { method: 'POST', headers, body: JSON.stringify(payload) })
+    assert.equal(refused.status, 409)
+    const error = (await refused.json()).error
+    assert.equal(error.code, 'duplicate_event')
+    assert.equal(error.duplicates[0].id, existingId)
+    assert.equal(error.duplicates[0].name, 'Kubernetes Workshop Hyderabad')
+    assert.match(error.message, /already exists/)
+    assert.equal(events.get(eventIds.created)?.slug === 'k8s-workshop-copy', false, 'nothing was written')
+
+    const check = await fetch(`${baseUrl}/api/admin/events/check-duplicates`, { method: 'POST', headers, body: JSON.stringify(payload) })
+    assert.equal((await check.json()).data.duplicates[0].id, existingId)
+
+    const confirmed = await fetch(`${baseUrl}/api/admin/events`, { method: 'POST', headers, body: JSON.stringify({ ...payload, allow_duplicate: true }) })
+    assert.equal(confirmed.status, 201)
+    assert.equal((await confirmed.json()).data.allow_duplicate, undefined, 'the confirmation flag is not stored')
+  } finally {
+    events.delete(existingId)
+  }
+})
+
+test('duplicate detection: two different events with similar titles can both be created', async () => {
+  const headers = { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' }
+  const existingId = '60000000-0000-4000-8000-000000000004'
+  events.set(existingId, { id: existingId, slug: 'react-8', name: 'React Hyderabad Meetup #8', status: 'published', start_date: '2026-12-19', organizer_name: 'React Hyderabad', deleted_at: null })
+  try {
+    for (const name of ['React Hyderabad Meetup #9', 'Angular Hyderabad Meetup #8']) {
+      const created = await fetch(`${baseUrl}/api/admin/events`, { method: 'POST', headers, body: JSON.stringify({ name, slug: 'similar-title', start_date: '2026-12-19', extraction_status: 'manual' }) })
+      assert.equal(created.status, 201, name)
+    }
+  } finally {
+    events.delete(existingId)
+  }
+})
+
+test('duplicate detection: publishing a second live copy needs confirmation; editing and publishing others is unaffected', async () => {
+  const headers = { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' }
+  const liveId = '60000000-0000-4000-8000-000000000005'
+  const copyId = '60000000-0000-4000-8000-000000000006'
+  events.set(liveId, { id: liveId, slug: 'devfest', name: 'DevFest Hyderabad 2026', status: 'published', start_date: '2026-12-20', start_time: '09:00', timezone: 'Asia/Kolkata', deleted_at: null })
+  events.set(copyId, { id: copyId, slug: 'devfest-copy', name: 'DevFest Hyderabad 2026', status: 'draft', start_date: '2026-12-20', start_time: '09:00', start_at: '2026-12-20T03:30:00.000Z', timezone: 'Asia/Kolkata', registration_status: 'InStock', deleted_at: null })
+  try {
+    const refused = await fetch(`${baseUrl}/api/admin/events/${copyId}/publish`, { method: 'POST', headers: { Authorization: 'Bearer owner-token' } })
+    assert.equal(refused.status, 409)
+    assert.equal((await refused.json()).error.duplicates[0].id, liveId)
+    assert.equal(events.get(copyId).status, 'draft')
+
+    // Editing the draft still works, and registration status values are normalised.
+    const edited = await fetch(`${baseUrl}/api/admin/events/${copyId}`, { method: 'PATCH', headers, body: JSON.stringify({ registration_status: 'Join Waitlist', event_type: 'Conference' }) })
+    assert.equal(edited.status, 200)
+    assert.equal((await edited.json()).data.registration_status, 'waitlist')
+
+    const confirmed = await fetch(`${baseUrl}/api/admin/events/${copyId}/publish`, { method: 'POST', headers, body: JSON.stringify({ allow_duplicate: true }) })
+    assert.equal(confirmed.status, 200)
+    assert.equal((await confirmed.json()).data.status, 'published')
+  } finally {
+    events.delete(liveId)
+    events.delete(copyId)
+  }
+})
+
+test('registration status is stored separately from publishing and served publicly', async () => {
+  const headers = { Authorization: 'Bearer owner-token', 'Content-Type': 'application/json' }
+  const id = '60000000-0000-4000-8000-000000000007'
+  events.set(id, { id, slug: 'closed-but-live', name: 'Closed but live', status: 'published', start_date: '2026-12-26', timezone: 'Asia/Kolkata', registration_status: 'open', deleted_at: null })
+  try {
+    const cases = [['closed', 'closed'], ['sold_out', 'sold_out'], ['Waitlist', 'waitlist'], ['Open', 'open'], ['not_announced', 'not_announced'], ['', null], ['Limited seats', 'Limited seats']]
+    for (const [input, stored] of cases) {
+      const response = await fetch(`${baseUrl}/api/admin/events/${id}`, { method: 'PATCH', headers, body: JSON.stringify({ registration_status: input }) })
+      const event = (await response.json()).data
+      assert.equal(event.registration_status, stored, input)
+      assert.equal(event.status, 'published', 'publishing status is untouched')
+    }
+    await fetch(`${baseUrl}/api/admin/events/${id}`, { method: 'PATCH', headers, body: JSON.stringify({ registration_status: 'closed' }) })
+    const publicEvent = (await (await fetch(`${baseUrl}/api/events/closed-but-live`)).json()).data
+    assert.equal(publicEvent.registration_status, 'closed')
+  } finally {
+    events.delete(id)
+  }
 })

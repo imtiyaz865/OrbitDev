@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { normalizeRegistrationStatus } from './registrationStatus.js'
 
 function minutePrecisionTime(value) {
   if (typeof value !== 'string') return null
@@ -74,7 +75,12 @@ export const eventSchema = z.object({
   ).optional(),
   registration_currency: textValue,
   registration_deadline: nullableDateTime,
-  registration_status: textValue,
+  // Recognised values (including legacy schema.org ones such as "InStock") are stored
+  // as open | closed | waitlist | sold_out | not_announced; other legacy text is kept.
+  registration_status: z.preprocess((value) => {
+    if (value === '' || value == null) return null
+    return normalizeRegistrationStatus(value) || value
+  }, z.string().max(240).nullable()).optional(),
   banner_url: optionalPublicUrl,
   original_banner_url: optionalPublicUrl,
   source_url: optionalPublicUrl,

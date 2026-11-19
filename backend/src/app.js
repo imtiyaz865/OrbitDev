@@ -20,6 +20,10 @@ export function createApp() {
       return callback(new Error('Origin is not allowed by CORS'))
     },
     credentials: true,
+    // Every admin call sends an Authorization header, which triggers a CORS preflight
+    // when the API is on another origin. Let browsers reuse an allowed preflight for
+    // 10 minutes instead of repeating it before each request. Origins are still checked.
+    maxAge: 600,
   }))
   app.use(express.json({ limit: '1mb' }))
   app.use('/api/admin/import', rateLimit({

@@ -4,8 +4,11 @@ import { Link } from 'react-router-dom'
 import { TimeField } from '../../components/TimeField.jsx'
 import { adminApi } from '../../services/adminApi.js'
 import { runSingleSubmission } from '../../utils/singleSubmission.js'
+import { useAutoDismiss } from '../../hooks/useAutoDismiss.js'
+import { EventImage } from '../../components/EventImage.jsx'
 import { zonedDateTimeToIso } from '../../utils/weekends.js'
 import { INDIA_TIME_ZONE } from '../../utils/times.js'
+import { isDuplicateError, showDuplicateToast } from './duplicateToast.jsx'
 
 const stages = [
   ['fetching', 'Fetching event page'],
@@ -87,8 +90,34 @@ function eventPayload(fields, extraction, sourceUrl) {
       return true
     }),
     field_provenance: provenance,
-    verification_status: 'needs_review',
+    // The backend marks a complete, consistent extraction as verified; anything
+    // else starts as needs_review. A manual completion sets verified explicitly.
+    verification_status: fields.verification_status === 'verified' ? 'verified' : 'needs_review',
+    last_verified_at: fields.verification_status === 'verified' ? (fields.last_verified_at || new Date().toISOString()) : null,
   }
+}
+
+const SCHEDULE_KEYS = ['start_date', 'start_time', 'end_date', 'end_time', 'timezone']
+
+/**
+ * When an existing event is refreshed from its source, fields the administrator
+ * edited by hand (provenance "manual" / "manually_edited") keep their values.
+ */
+function preserveManualEdits(current, updates) {
+  const provenance = current.field_provenance || {}
+  const manualKeys = Object.keys(provenance).filter((key) => ['manual', 'manually_edited'].includes(provenance[key]) && Object.hasOwn(current, key))
+  if (!manualKeys.length) return updates
+  const next = { ...updates, field_provenance: { ...updates.field_provenance } }
+  for (const key of manualKeys) {
+    next[key] = current[key]
+    next.field_provenance[key] = provenance[key]
+  }
+  // Let the server recompute the start/end instants from the kept local date and time.
+  if (manualKeys.some((key) => SCHEDULE_KEYS.includes(key))) {
+    delete next.start_at
+    delete next.end_at
+  }
+  return next
 }
 
 function missingRequirements(fields) {
@@ -113,6 +142,7 @@ export function AdminDashboardPage() {
   const [duplicate, setDuplicate] = useState(null)
   const [draftId, setDraftId] = useState(null)
   const submissionLock = useRef(false)
+  const { leaving: successLeaving, pauseProps: successPauseProps } = useAutoDismiss(success, () => setSuccess(null))
 
   const refreshEvents = useCallback(async () => {
     const result = await adminApi.getEvents({ page: 1, page_size: 6, sort: 'updated', direction: 'desc' })
@@ -159,7 +189,7 @@ export function AdminDashboardPage() {
     if (missing.length) {
       let correctionState = { ...extraction, fields: candidate }
       if (!extraction.duplicate && !extraction.draft_id && candidate.name?.trim()) {
-        const saved = await adminApi.createEvent(eventPayload(candidate, extraction, url.trim()))
+        const saved = await adminApi.createEvent(eventPayload(candidate, extraction, url.trim()), { allowDuplicate: extraction.allow_duplicate })
         correctionState = { ...correctionState, draft_id: saved.id }
         setDraftId(saved.id)
       }
@@ -175,7 +205,7 @@ export function AdminDashboardPage() {
       if (duplicateEvent.deleted_at) await adminApi.restoreEvent(duplicateEvent.id)
       const current = await adminApi.getEvent(duplicateEvent.id)
       const merged = { ...current, ...candidate }
-      const updates = eventPayload(merged, extraction, url.trim())
+      const updates = preserveManualEdits(current, eventPayload(merged, extraction, url.trim()))
       delete updates.status
       saved = await adminApi.updateEvent(duplicateEvent.id, updates)
     } else if (extraction.draft_id) {
@@ -184,12 +214,12 @@ export function AdminDashboardPage() {
       delete updates.status
       saved = await adminApi.updateEvent(extraction.draft_id, updates)
     } else {
-      saved = await adminApi.createEvent(payload)
+      saved = await adminApi.createEvent(payload, { allowDuplicate: extraction.allow_duplicate })
     }
     setDraftId(saved.id)
     let published
     try {
-      published = await adminApi.publishEvent(saved.id)
+      published = await adminApi.publishEvent(saved.id, { allowDuplicate: extraction.allow_duplicate })
     } catch (err) {
       err.savedDraftId = saved.id
       throw err
@@ -211,8 +241,22 @@ export function AdminDashboardPage() {
     }
   }
 
-  async function importAndPublish(event) {
-    event.preventDefault()
+  function reportPublishError(err, extraction, fallback) {
+    setStage('')
+    if (err.savedDraftId) setDraftId(err.savedDraftId)
+    if (isDuplicateError(err) && extraction) {
+      // Found while saving or publishing: nothing was published; the administrator decides.
+      setError(err.savedDraftId ? 'Saved as a draft. It was not published because a matching event is already live.' : '')
+      showDuplicateToast(err.duplicates, { onProceed: () => publishAsNewEvent(extraction), proceedLabel: 'Not a duplicate — publish anyway' })
+      return
+    }
+    setError(err.savedDraftId
+      ? `The event was saved as a draft, but publishing failed: ${err.message}`
+      : err.message || fallback)
+  }
+
+  async function importAndPublish(event, { allowDuplicate = false } = {}) {
+    event?.preventDefault()
     await runSingleSubmission(submissionLock, async () => {
       if (stage) return
       setError('')
@@ -221,26 +265,50 @@ export function AdminDashboardPage() {
       setDraftId(null)
       setCorrection(null)
       setStage('fetching')
+      let extraction = null
       try {
-        const extractionRequest = adminApi.importEvent(url.trim())
+        const extractionRequest = adminApi.importEvent(url.trim(), { allowDuplicate })
         await new Promise((resolve) => window.requestAnimationFrame(resolve))
         setStage('extracting')
         setStage('researching')
-        const extraction = await extractionRequest
+        extraction = await extractionRequest
         setStage('validating')
-        if (extraction.duplicate) {
+        if (extraction.duplicate && !allowDuplicate) {
+          // Same source page: offer the existing record (open / update), never a silent overwrite.
           setDuplicate(extraction.duplicate)
           setStage('')
           setError('This source URL is already in your event library. Open the existing record to review or publish it.')
+          showDuplicateToast(extraction.duplicates?.length ? extraction.duplicates : [extraction.duplicate], {
+            onProceed: () => importAndPublish(null, { allowDuplicate: true }),
+            proceedLabel: 'Not a duplicate — import as a new event',
+          })
+          return
+        }
+        if (allowDuplicate) {
+          extraction = { ...extraction, duplicate: null, allow_duplicate: true }
+        } else if (extraction.duplicates?.length) {
+          // Same event under another URL (title, date, organizer): stop before anything is saved.
+          setStage('')
+          const pending = extraction
+          showDuplicateToast(extraction.duplicates, { onProceed: () => publishAsNewEvent(pending), proceedLabel: 'Not a duplicate — publish anyway' })
           return
         }
         await publishExtracted(extraction)
       } catch (err) {
-        setStage('')
-        if (err.savedDraftId) setDraftId(err.savedDraftId)
-        setError(err.savedDraftId
-          ? `The event was saved as a draft, but publishing failed: ${err.message}`
-          : err.message || 'The event could not be imported. Check the URL and try again.')
+        reportPublishError(err, extraction, 'The event could not be imported. Check the URL and try again.')
+      }
+    })
+  }
+
+  async function publishAsNewEvent(extraction) {
+    await runSingleSubmission(submissionLock, async () => {
+      const confirmed = { ...extraction, duplicate: null, allow_duplicate: true }
+      setError('')
+      setStage('validating')
+      try {
+        await publishExtracted(confirmed)
+      } catch (err) {
+        reportPublishError(err, null, 'The event could not be published. Please try again.')
       }
     })
   }
@@ -256,7 +324,8 @@ export function AdminDashboardPage() {
         setError('Correct the highlighted time fields before publishing.')
         return
       }
-      const correctedFields = { ...correction.fields, ...values, name: values.name.trim() }
+      // The administrator has just confirmed the required details, so the event is verified.
+      const correctedFields = { ...correction.fields, ...values, name: values.name.trim(), verification_status: 'verified', last_verified_at: new Date().toISOString() }
       const reviewed = {
         ...correction,
         missing_fields: (correction.missing_fields || []).filter((field) => (
@@ -274,11 +343,7 @@ export function AdminDashboardPage() {
       try {
         await publishExtracted(reviewed, correctedFields)
       } catch (err) {
-        setStage('')
-        if (err.savedDraftId) setDraftId(err.savedDraftId)
-        setError(err.savedDraftId
-          ? `The event was saved as a draft, but publishing failed: ${err.message}`
-          : err.message || 'The event could not be published. Please try again.')
+        reportPublishError(err, { ...reviewed, fields: correctedFields }, 'The event could not be published. Please try again.')
       }
     })
   }
@@ -291,7 +356,7 @@ export function AdminDashboardPage() {
       setStage('fetching')
       try {
         setStage('researching')
-        const extraction = await adminApi.importEvent(url.trim(), undefined, true)
+        const extraction = await adminApi.importEvent(url.trim(), { updateExisting: true })
         setStage('validating')
         await publishExtracted(extraction, extraction.fields || {})
       } catch (err) {
@@ -315,7 +380,7 @@ export function AdminDashboardPage() {
           <label className="sr-only" htmlFor="quick-event-url">Public event URL</label>
           <input id="quick-event-url" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Paste an event URL..." required disabled={Boolean(stage)} />
           <button className="admin-primary-button" type="submit" disabled={Boolean(stage) || !url.trim()}>
-            {stage ? <LoaderCircle className="spin" size={16} /> : <ArrowUpRight size={16} />}
+            {stage ? <LoaderCircle className="spin" size={15} /> : <ArrowUpRight size={15} />}
             {stage ? 'Working…' : 'Import & Publish'}
           </button>
         </form>
@@ -329,8 +394,10 @@ export function AdminDashboardPage() {
           })}
         </ol>}
 
-        {error && <div className="admin-alert quick-publish-alert" role="alert">{error}{duplicate && <><Link to={`/admin/events/${duplicate.id}/edit`}>Open “{duplicate.name}” <ArrowUpRight size={13} /></Link><button className="admin-inline-link" type="button" onClick={updateExistingEvent} disabled={Boolean(stage)}>{duplicate.deleted_at ? 'Restore, update & publish' : 'Update existing event'}</button></>}{draftId && <Link to={`/admin/events/${draftId}/edit`}>Open saved draft <ArrowUpRight size={13} /></Link>}</div>}
-        {success && <div className="publish-success" role="status"><span><Check size={14} /></span><div><strong>Published successfully</strong><small>{success.event.name} is now live on the public site.</small></div><Link to={`/admin/events/${success.event.id}/edit`} aria-label={`Edit ${success.event.name}`}><ArrowUpRight size={15} /></Link></div>}
+        {error && <div className="admin-alert quick-publish-alert" role="alert">{error}{duplicate && <><Link to={`/admin/events/${duplicate.id}/edit`}>Open “{duplicate.name}” <ArrowUpRight size={14} /></Link><button className="admin-inline-link" type="button" onClick={updateExistingEvent} disabled={Boolean(stage)}>{duplicate.deleted_at ? 'Restore, update & publish' : 'Update existing event'}</button></>}{draftId && <Link to={`/admin/events/${draftId}/edit`}>Open saved draft <ArrowUpRight size={14} /></Link>}</div>}
+        <div className="admin-live-region" aria-live="polite" aria-atomic="true">
+          {success && <div className={`publish-success admin-transient${successLeaving ? ' is-leaving' : ''}`} {...successPauseProps}><span aria-hidden="true"><Check size={14} /></span><div><strong>Published successfully</strong><small>{success.event.name} is now live on the public site.</small></div><Link to={`/admin/events/${success.event.id}/edit`} aria-label={`Edit ${success.event.name}`}><ArrowUpRight size={15} /></Link></div>}
+        </div>
 
         {correction && <form className="required-correction" onSubmit={completeAndPublish}>
           <div><strong>A few details need your help</strong><p>{correction.draft_id ? 'The extracted event is saved privately as a draft. Complete only the required fields.' : correction.failed_import_saved ? 'The incomplete extraction is saved for correction. Complete only the required fields.' : 'Complete only the required fields before the event can be saved.'}</p></div>
@@ -351,13 +418,13 @@ export function AdminDashboardPage() {
       {eventsError && <div className="admin-alert" role="alert">The recent event list could not be refreshed: {eventsError}</div>}
       {events.length ? <div className="recent-events" role="list">
         {events.map((event) => <article className="recent-event-row" role="listitem" key={event.id}>
-          {event.banner_url ? <img className="recent-event-image" src={event.banner_url} alt="" loading="lazy" decoding="async" /> : <span className="recent-event-image recent-event-image-empty"><Ticket size={16} /></span>}
+          <EventImage className="recent-event-image" src={event.banner_url} width={120} fallback={<span className="recent-event-image recent-event-image-empty"><Ticket size={16} /></span>} />
           <div className="recent-event-main"><Link to={`/admin/events/${event.id}/edit`}>{event.name}</Link><span>{event.organizer_name || 'Organizer not specified'}</span></div>
           <span className="recent-event-date">{event.start_date || 'Date TBD'}</span>
           <span className={`admin-status status-${event.status || 'draft'}`}><i />{event.status || 'draft'}</span>
           <Link className="recent-event-action" to={`/admin/events/${event.id}/edit`} aria-label={`Open ${event.name}`}><ArrowUpRight size={15} /></Link>
         </article>)}
-      </div> : <div className="admin-empty recent-empty"><Ticket size={20} /><strong>{error ? 'Your events could not be loaded' : 'No events yet'}</strong>{error && <span>{error}</span>}<Link to="/admin/events/new/edit"><Plus size={14} /> Create an event</Link></div>}
+      </div> : <div className="admin-empty recent-empty"><Ticket size={20} /><strong>{eventsError ? 'Your events could not be loaded' : 'No events yet'}</strong>{eventsError && <span>{eventsError}</span>}<Link to="/admin/events/new/edit"><Plus size={14} /> Create an event</Link></div>}
     </div>
   )
 }

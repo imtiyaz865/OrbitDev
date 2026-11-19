@@ -10,7 +10,9 @@ import {
   formatIndiaDate,
 } from '../utils/times.js'
 import { eventTimingStatus } from '../utils/eventStatus.js'
+import { registrationStatusInfo } from '../utils/registrationStatus.js'
 import { EventArtwork } from '../components/OrbitRings.jsx'
+import { EventImage } from '../components/EventImage.jsx'
 import { SITE_NAME, absoluteUrl, truncate, useSeo } from '../seo/useSeo.js'
 
 
@@ -56,20 +58,20 @@ function formatFee(event) {
   return ''
 }
 
+/**
+ * Registration availability as stored by the admin (open, closed, waitlist,
+ * sold out, not announced). Legacy values such as "InStock" are normalised;
+ * anything unrecognised reads "Status Not Announced" rather than a guess.
+ */
 function registrationState(event, registrationUrl) {
-  const rawStatus = event.registration_status?.trim()
-  const status = rawStatus
-    ?.replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-  if (!registrationUrl) {
-    return { label: status || 'Registration link not provided', available: false }
+  const info = registrationStatusInfo(event.registration_status)
+  const available = Boolean(registrationUrl) && info.available
+  return {
+    key: info.key,
+    label: info.label,
+    available,
+    action: !available ? 'Registration details' : info.key === 'waitlist' ? 'Join waitlist' : 'Register',
   }
-  if (status) return {
-    label: status,
-    available: !/closed|sold\s?out|full|unavailable|cancelled|canceled|expired/i.test(status),
-  }
-  return { label: 'Registration available', available: true }
 }
 
 function ImageWithFallback({
@@ -101,6 +103,7 @@ function ImageWithFallback({
       alt={alt}
       loading={loading}
       decoding="async"
+      referrerPolicy="no-referrer"
       fetchpriority={fetchPriority}
       onError={() => setFailed(true)}
     />
@@ -407,7 +410,7 @@ export function EventDetailPage() {
       { day: 'numeric', month: 'long', year: 'numeric' },
     )
     : ''
-  const registerLabel = registration.available ? 'Register' : 'Registration details'
+  const registerLabel = registration.action
 
   return (
     <article className="o-detail">
@@ -416,13 +419,14 @@ export function EventDetailPage() {
           <Link to="/events" className="o-back"><ArrowLeft size={14} aria-hidden="true" /> All events</Link>
           <div className="o-detail-hero-grid">
             <figure className={`o-detail-banner${event.banner_url ? '' : ' is-empty'}`}>
-              <ImageWithFallback
+              <EventImage
                 src={event.banner_url}
                 alt={event.banner_url ? `${title} banner` : ''}
-                fallbackClassName="o-detail-banner-fallback"
-                fallbackLabel={<EventArtwork />}
+                width={1600}
+                adaptive
                 loading="eager"
                 fetchPriority="high"
+                fallback={<div className="o-detail-banner-fallback is-unavailable"><EventArtwork /></div>}
               />
             </figure>
             <div className="o-detail-heading">
@@ -466,7 +470,7 @@ export function EventDetailPage() {
           <aside className="o-detail-aside" aria-labelledby="registration-title">
             <div className="o-register">
               <h2 id="registration-title" className="o-label">Registration</h2>
-              <p className={`o-register-status${registration.available ? ' is-open' : ''}`}>
+              <p className={`o-register-status is-${registration.key}${registration.available ? ' is-open' : ''}`}>
                 <i aria-hidden="true" />{registration.label}
               </p>
               {fee && <p className="o-register-fee"><span>Entry</span><strong>{fee}</strong></p>}

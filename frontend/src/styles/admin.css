@@ -304,6 +304,8 @@
 .recent-events, .event-library-list { border-top: 1px solid var(--line); }
 .recent-event-row { min-height: 66px; display: grid; grid-template-columns: 42px minmax(160px, 1.6fr) minmax(112px, .8fr) 105px 36px; align-items: center; gap: 13px; border-bottom: 1px solid var(--line); }
 .recent-event-image, .library-event-image { width: 38px; height: 38px; border-radius: 5px; object-fit: cover; }
+/* Placeholder tile while a remote thumbnail loads (EventImage). */
+img.recent-event-image.is-loading, img.library-event-image.is-loading { background: var(--surface); }
 .recent-event-image-empty, .library-event-image-empty { display: grid; place-items: center; background: var(--surface); color: var(--muted); }
 .recent-event-main, .library-event-title { min-width: 0; display: grid; gap: 5px; }
 .recent-event-main > a, .library-event-title > a { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -324,6 +326,7 @@
 .event-filter-tabs button:hover, .event-filter-tabs button.is-selected { background: var(--surface); color: var(--text); }
 .event-filter-tabs button.is-selected { box-shadow: inset 0 0 0 1px var(--line); }
 .event-library-controls > select { min-height: 36px; margin-left: auto; border-radius: 5px; font-size: 10px; }
+.event-library-controls > select + select { margin-left: 0; }
 .admin-result-count { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .event-library-head, .event-library-row { display: grid; grid-template-columns: minmax(230px, 1.5fr) minmax(130px, .8fr) minmax(145px, 1fr) 100px 34px; align-items: center; gap: 14px; }
 .event-library-head { min-height: 38px; color: var(--faint); font-family: var(--mono); font-size: 8px; letter-spacing: .07em; }
@@ -592,8 +595,16 @@
 
 .admin-primary-button,
 .admin-secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   min-height: 44px;
   padding: 0 17px;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  vertical-align: middle;
   border: 1px solid var(--blue);
   border-radius: 8px;
   background: var(--blue);
@@ -631,6 +642,19 @@
 .admin-primary-button:disabled,
 .admin-secondary-button:disabled {
   opacity: .56;
+}
+
+/* Icons in buttons and links keep their size and sit on the text's centre line. */
+.admin-primary-button > svg,
+.admin-secondary-button > svg,
+.admin-danger-button > svg,
+.admin-preview-button > svg,
+.admin-inline-link > svg,
+.admin-back > svg,
+.admin-topbar-public > svg,
+.quick-publish-alert a > svg {
+  display: block;
+  flex: none;
 }
 
 .quick-publish {
@@ -798,8 +822,13 @@
 .admin-row-action,
 .recent-event-action,
 .publish-success > a {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
   width: 34px;
   height: 34px;
+  padding: 0;
+  line-height: 0;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--surface);
@@ -1298,6 +1327,11 @@
   gap: 8px;
 }
 
+.editor-action-bar .editor-unsaved {
+  align-self: center;
+  margin-right: 4px;
+}
+
 .editor-action-bar .admin-primary-button,
 .editor-action-bar .admin-secondary-button {
   min-height: 39px;
@@ -1578,8 +1612,15 @@
     align-items: stretch;
   }
 
-  .editor-action-bar > div > * {
+  .editor-action-bar > div {
     flex: 1;
+  }
+
+  /* Share the full bar width; keep each label on one line and move a button to a
+     second row rather than squeezing its text and icon. */
+  .editor-action-bar > div > * {
+    flex: 1 1 auto;
+    white-space: nowrap;
   }
 
   .editor-banner-field {
@@ -1793,6 +1834,29 @@
   font-size: 11px;
 }
 
+.admin-success > svg { flex: none; }
+
+/* Success notices that dismiss themselves (useAutoDismiss) fade out before removal.
+   The live region wrapper is always rendered so screen readers announce each notice. */
+.admin-transient {
+  transition: opacity .25s ease, transform .25s ease;
+}
+
+.admin-transient.is-leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.recent-event-action > svg,
+.publish-success > a > svg {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-transient { transition: none; }
+  .admin-transient.is-leaving { transform: none; }
+}
+
 .correction-timezone-note,
 .weekly-update-footnote {
   color: var(--muted);
@@ -1934,3 +1998,62 @@
 :root[data-theme='light'] .admin-mark-dark { display: block; }
 .admin-login-aside .wordmark { display: inline-flex; align-items: center; gap: 10px; }
 .admin-login-aside .admin-mark { width: 26px; height: 26px; }
+
+/* ---------- Event library: numbered pagination and date filter ---------- */
+
+.admin-pagination > div { flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.admin-pagination .admin-page-number { min-width: 35px; justify-content: center; padding: 0 8px; font-variant-numeric: tabular-nums; }
+.admin-pagination .admin-page-number:hover:not(.is-current) { border-color: var(--line-strong); }
+.admin-pagination .admin-page-number.is-current { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); font-weight: 700; }
+.admin-page-gap { min-width: 18px; color: var(--muted); text-align: center; }
+
+.event-date-filter {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 36px; padding: 0 6px 0 10px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: var(--muted);
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+.event-date-filter svg { flex: none; }
+.event-date-filter input {
+  min-width: 0; min-height: 34px; padding: 0; border: 0; outline: 0;
+  background: transparent; color: var(--text); font-family: var(--font-body); font-size: 12px;
+  color-scheme: dark;
+}
+:root[data-theme='light'] .event-date-filter input { color-scheme: light; }
+.event-date-filter:focus-within { border-color: var(--color-accent); box-shadow: var(--focus-ring); }
+.event-date-filter.is-active { border-color: var(--blue); color: var(--blue); }
+.event-date-filter button {
+  display: grid; place-items: center; width: 26px; height: 26px; padding: 0;
+  border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.event-date-filter button:hover { background: var(--blue-soft); color: var(--text); }
+
+@media (max-width: 640px) {
+  .event-date-filter { flex: 1 1 100%; }
+  .event-date-filter input { flex: 1; }
+  .admin-pagination > div { justify-content: flex-start; }
+}
+
+.admin-field > .editor-suggestion { align-self: flex-start; margin-top: 2px; font-size: 11px; color: var(--blue); }
+
+/* Automatic field values: how an imported event type / registration status was set. */
+.field-origin { display: inline-flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.field-origin.is-predicted, .field-origin.is-suggested { color: var(--blue); }
+.field-origin svg { flex: none; }
+
+/* React Toastify, matched to the admin palette. */
+.admin-app .Toastify__toast { border: 1px solid var(--line); border-radius: 0; background: var(--surface); color: var(--text); font-family: inherit; font-size: 13px; box-shadow: 0 12px 32px rgb(0 0 0 / .25); }
+.admin-app .Toastify__toast--warning { border-left: 3px solid var(--blue); }
+.admin-app .Toastify__toast--success { border-left: 3px solid var(--color-success); }
+.admin-app .Toastify__close-button { color: var(--muted); opacity: 1; }
+.admin-app .Toastify__progress-bar { background: var(--blue); }
+.duplicate-toast-shell { width: min(380px, calc(100vw - 32px)); }
+.duplicate-toast { display: grid; gap: 8px; }
+.duplicate-toast-title { font-size: 13px; font-weight: 600; line-height: 1.35; }
+.duplicate-toast-event { display: grid; gap: 2px; margin: 0; }
+.duplicate-toast-event span { font-weight: 500; overflow-wrap: anywhere; }
+.duplicate-toast-event small, .duplicate-toast-reasons { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.duplicate-toast-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 4px; }
+.duplicate-toast-actions .admin-secondary-button { min-height: 30px; padding: 0 10px; font-size: 12px; text-decoration: none; }
+.duplicate-toast-actions .admin-inline-link { font-size: 12px; }

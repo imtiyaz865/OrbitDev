@@ -1,5 +1,6 @@
 import { ArrowRight, ArrowUpRight } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { CollaborationsSection } from '../components/Collaborations.jsx'
 import { EventCard } from '../components/EventCard.jsx'
 import { OrbitRings } from '../components/OrbitRings.jsx'
 import { StarField } from '../components/StarField.jsx'
@@ -144,6 +145,8 @@ export function HomePage() {
           </div>
         </div>
       </section>
+
+      <CollaborationsSection />
     </>
   )
 }

@@ -29,7 +29,7 @@ eventsRouter.get('/weekends', async (request, response) => {
     }
     const { data, error } = await getSupabase()
       .from('events')
-      .select('id,slug,name,event_type,start_at,end_at,start_date,start_time,end_time,timezone,organizer_name,banner_url')
+      .select('id,slug,name,event_type,start_at,end_at,start_date,start_time,end_time,timezone,organizer_name,banner_url,registration_status')
       .eq('status', 'published')
       .is('deleted_at', null)
       .gte('start_date', range.data.start)

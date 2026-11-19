@@ -1,6 +1,10 @@
 import { GoogleGenAI } from '@google/genai'
 import { load } from 'cheerio'
 import { z } from 'zod'
+import { PREDICTABLE_EVENT_TYPES, normalizeEventType } from './eventType.js'
+import { REGISTRATION_STATUSES, normalizeRegistrationStatus } from './registrationStatus.js'
+
+const AI_REGISTRATION_STATUSES = REGISTRATION_STATUSES.filter((status) => status !== 'not_announced')
 
 const maxSourceTextLength = 24_000
 const requestTimeoutMs = 20_000
@@ -27,7 +31,7 @@ const responseFieldSchemas = {
   organizer_website: { type: 'STRING', nullable: true },
   registration_url: { type: 'STRING', nullable: true },
   banner_url: { type: 'STRING', nullable: true },
-  event_type: { type: 'STRING', nullable: true },
+  event_type: { type: 'STRING', enum: PREDICTABLE_EVENT_TYPES, nullable: true },
   tags: { type: 'ARRAY', items: { type: 'STRING' } },
   speakers: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
     name: { type: 'STRING' }, role: { type: 'STRING', nullable: true },
@@ -43,7 +47,7 @@ const responseFieldSchemas = {
     end_time: { type: 'STRING', nullable: true }, speaker_name: { type: 'STRING', nullable: true },
     description: { type: 'STRING', nullable: true },
   }, required: ['title'] } },
-  registration_status: { type: 'STRING', nullable: true },
+  registration_status: { type: 'STRING', enum: AI_REGISTRATION_STATUSES, nullable: true },
   registration_fee_type: { type: 'STRING', enum: ['free', 'paid', 'donation'], nullable: true },
   registration_amount: { type: 'NUMBER', nullable: true },
   registration_currency: { type: 'STRING', nullable: true },
@@ -100,6 +104,19 @@ const researchedFieldsSchema = z.object({
   registration_deadline: z.string().nullable(),
 }).strict()
 
+// Review flags may refer to any event field, or to the event as a whole.
+const flagFields = [...eventFields, 'general']
+const flagKinds = ['missing', 'inconsistent', 'date_time']
+
+const analysisSchema = z.object({
+  formatted_description: z.string().max(10000).nullable().optional(),
+  review_flags: z.array(z.object({
+    field: z.enum(flagFields),
+    kind: z.enum(flagKinds),
+    message: z.string().trim().min(1).max(300),
+  }).strict()).max(12).optional(),
+}).strict()
+
 const responseSchema = {
   type: 'OBJECT',
   properties: {
@@ -107,6 +124,25 @@ const responseSchema = {
       type: 'OBJECT',
       properties: responseFieldSchemas,
       required: eventFields,
+    },
+    analysis: {
+      type: 'OBJECT',
+      properties: {
+        formatted_description: { type: 'STRING', nullable: true },
+        review_flags: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              field: { type: 'STRING', enum: flagFields },
+              kind: { type: 'STRING', enum: flagKinds },
+              message: { type: 'STRING' },
+            },
+            required: ['field', 'kind', 'message'],
+          },
+        },
+      },
+      required: ['formatted_description', 'review_flags'],
     },
     evidence: {
       type: 'ARRAY',
@@ -120,7 +156,7 @@ const responseSchema = {
       },
     },
   },
-  required: ['fields', 'evidence'],
+  required: ['fields', 'evidence', 'analysis'],
 }
 
 const systemInstruction = [
@@ -131,7 +167,28 @@ const systemInstruction = [
   'Preserve the event local calendar date and wall-clock time. Do not infer an IANA timezone from a country or city alone.',
   'For each non-empty field, include evidence with a URL present in the supplied page or a URL actually cited by Google Search grounding.',
   'Return only the requested JSON object. Do not invent speakers, sponsors, prices, venues, or agenda items.',
+  `event_type: classify the event as exactly one of ${PREDICTABLE_EVENT_TYPES.join(', ')} using its title, description, agenda and format; return null when none clearly fits.`,
+  `registration_status: one of ${AI_REGISTRATION_STATUSES.join(', ')}, only when the page visibly says so (for example a "Register" or "RSVP" button for open, "Join waitlist" for waitlist, "Sold out" or "Event full" for sold_out, "Registration closed" for closed). Return null when the page does not show it; never infer it from the date or from the event being free.`,
+  'tags: 3 to 8 short technology or topic tags (for example React, Kubernetes, Generative AI) that are explicitly mentioned in the event title, description or agenda. Never add topics that are not mentioned.',
+  'analysis.formatted_description: rewrite only the layout of the event description for readability, using short paragraphs and "- " bullet lists. Keep the original wording; do not add, remove, summarise or change any fact, name, number, date, time, price, venue or URL. Return null when there is no description.',
+  'analysis.review_flags: list essential information that is missing (name, date, start time, venue or online details, registration link) and contradictions visible in the supplied data, using kind "date_time" for date or time problems such as a weekday that does not match the date, an end before the start, or different times in the text and metadata. Keep each message short and factual. Return an empty array when there is nothing to flag.',
 ].join(' ')
+
+function comparable(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9+#]+/g, ' ').trim()
+}
+
+/** Keeps only tags that are actually mentioned in the event text, de-duplicated. */
+function mentionedTags(tags, corpus) {
+  const haystack = ` ${comparable(corpus)} `
+  const seen = new Set()
+  return tags.map((tag) => tag.trim()).filter((tag) => {
+    const key = comparable(tag)
+    if (!key || seen.has(key) || !haystack.includes(` ${key} `)) return false
+    seen.add(key)
+    return true
+  }).slice(0, 10)
+}
 
 export function pageText(html) {
   const $ = load(html)
@@ -201,10 +258,11 @@ export async function researchEventDetails(
     apiKey: env.GEMINI_API_KEY.trim(),
     httpOptions: { timeout: requestTimeoutMs },
   })
+  const sourceText = pageText(html)
   const contents = JSON.stringify({
     canonical_source_url: finalUrl,
     existing_metadata: existingFields,
-    public_page_text: pageText(html),
+    public_page_text: sourceText,
   })
 
   const response = await ai.interactions.create({
@@ -213,7 +271,7 @@ export async function researchEventDetails(
     system_instruction: systemInstruction,
     generation_config: {
       temperature: 0,
-      max_output_tokens: 5000,
+      max_output_tokens: 8000,
     },
     response_format: {
       type: 'text',
@@ -237,8 +295,14 @@ export async function researchEventDetails(
       field: z.enum(eventFields),
       source_url: z.string().url(),
     }).strict()).max(200),
+    analysis: analysisSchema.optional(),
   }).strict().safeParse(decoded)
   if (!parsed.success) throw new Error('Gemini returned event data that did not match the supported schema.')
+  const eventText = [sourceText, existingFields?.name, existingFields?.description, parsed.data.fields.description].filter(Boolean).join(' ')
+  // Classification and tags must stay within the vocabulary and what the page mentions.
+  parsed.data.fields.event_type = normalizeEventType(parsed.data.fields.event_type)
+  parsed.data.fields.registration_status = normalizeRegistrationStatus(parsed.data.fields.registration_status)
+  parsed.data.fields.tags = mentionedTags(parsed.data.fields.tags, eventText)
 
   const citedUrls = citationUrls(response)
   const allowedEvidenceUrls = new Set([sourceUrl, finalUrl, ...citedUrls])
@@ -274,6 +338,10 @@ export async function researchEventDetails(
     fields,
     field_provenance: fieldProvenance,
     source_urls: [...sourceUrls],
+    analysis: {
+      formatted_description: parsed.data.analysis?.formatted_description?.trim() || null,
+      review_flags: parsed.data.analysis?.review_flags || [],
+    },
   }
 }
 

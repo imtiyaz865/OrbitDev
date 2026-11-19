@@ -6,6 +6,13 @@ import { adminApi } from '../../services/adminApi.js'
 import { isoToZonedInput, zonedDateTimeToIso } from '../../utils/weekends.js'
 import { format12HourTime, INDIA_TIME_ZONE } from '../../utils/times.js'
 import { runSingleSubmission } from '../../utils/singleSubmission.js'
+import { classifyEventType, eventTypeOptions } from '../../utils/eventType.js'
+import { registrationStatusInfo, registrationStatusOptions, registrationStatusSelectValue } from '../../utils/registrationStatus.js'
+import { toast } from 'react-toastify'
+import { isDuplicateError, showDuplicateToast } from './duplicateToast.jsx'
+import { FieldOrigin } from './FieldOrigin.jsx'
+
+const TYPE_SIGNAL_KEYS = new Set(['name', 'description', 'agenda_items', 'attendance_mode'])
 
 const emptyEvent = {
   name: '', slug: '', description: '', event_type: '', tags: [],
@@ -13,7 +20,7 @@ const emptyEvent = {
   attendance_mode: '', venue_name: '', address: '', city: '', online_details: '',
   organizer_name: '', organizer_website: '', organizer_logo_url: '',
   sponsors: [], speakers: [], agenda_items: [],
-  registration_url: '', registration_fee_type: '', registration_amount: '', registration_currency: '', registration_deadline: '', registration_status: '',
+  registration_url: '', registration_fee_type: '', registration_amount: '', registration_currency: '', registration_deadline: '', registration_status: 'not_announced',
   banner_url: '', source_url: '', source_platform: '', source_title: '',
   extraction_status: 'manual', extraction_metadata: {}, field_provenance: {}, missing_fields: [], verification_status: 'needs_review',
   extracted_at: null, last_verified_at: null,
@@ -40,7 +47,8 @@ export function AdminImportPage({ manual = false }) {
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draftId, setDraftId] = useState(null)
-  const [success, setSuccess] = useState('')
+  // Set once the administrator confirms a flagged match is a different event.
+  const [duplicateConfirmed, setDuplicateConfirmed] = useState(false)
   const [imageFailed, setImageFailed] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [invalidTimes, setInvalidTimes] = useState({})
@@ -71,6 +79,14 @@ export function AdminImportPage({ manual = false }) {
         ...current.field_provenance,
         [key]: current.field_provenance?.[key] ? 'manually_edited' : 'manual',
       }
+      if (key === 'verification_status') next.last_verified_at = value === 'verified' ? new Date().toISOString() : null
+      // Suggest an event type from the title/description/agenda until the administrator sets one.
+      if (TYPE_SIGNAL_KEYS.has(key) && (!current.event_type || current.field_provenance?.event_type === 'suggested')) {
+        const suggested = classifyEventType(next)
+        next.event_type = suggested || ''
+        if (suggested) next.field_provenance.event_type = 'suggested'
+        else delete next.field_provenance.event_type
+      }
       if (!isEmpty && current.extraction_metadata?.warnings) {
         next.extraction_metadata = {
           ...current.extraction_metadata,
@@ -82,6 +98,7 @@ export function AdminImportPage({ manual = false }) {
   }
 
   function fieldStatus(key) {
+    if (event.field_provenance?.[key] === 'suggested') return 'Suggested'
     if (event.missing_fields?.includes(key)) return 'Needs review'
     if (event.field_provenance?.[key] === 'manually_edited') return 'Manually edited'
     if (event.field_provenance?.[key] === 'extracted') return 'Extracted'
@@ -89,17 +106,32 @@ export function AdminImportPage({ manual = false }) {
     return 'Manual'
   }
 
-  async function extract(e) {
-    e.preventDefault()
+  async function extract(e, { allowDuplicate = false } = {}) {
+    e?.preventDefault()
     setError('')
-    setSuccess('')
+    setDuplicateConfirmed(allowDuplicate)
     setResult(null)
     setTimeInputGeneration((generation) => generation + 1)
     setBusy(true)
     setInvalidTimes({})
     try {
-      const extraction = await adminApi.importEvent(url.trim())
+      const extraction = await adminApi.importEvent(url.trim(), { allowDuplicate })
+      if (extraction.research?.status === 'skipped_duplicate') {
+        // Same source page as an existing event: nothing is fetched or created.
+        const duplicates = extraction.duplicates?.length ? extraction.duplicates : [extraction.duplicate]
+        showDuplicateToast(duplicates, { onProceed: () => extract(null, { allowDuplicate: true }), proceedLabel: 'Not a duplicate — import anyway' })
+        setEvent({ ...emptyEvent, source_url: url.trim() })
+        setResult({ mode: 'duplicate', duplicate: duplicates[0], fields: {}, missing_fields: [], extracted_field_count: 0, extracted_at: null })
+        return
+      }
+      if (extraction.duplicates?.length && !allowDuplicate) {
+        showDuplicateToast(extraction.duplicates, { onProceed: () => setDuplicateConfirmed(true), proceedLabel: 'Not a duplicate — keep editing' })
+      }
       const fields = extraction.fields || {}
+      // Event type and registration status carry how they were decided (and the type's confidence).
+      const decided = Object.fromEntries(['event_type', 'registration_status']
+        .filter((key) => extraction.field_provenance?.[key])
+        .map((key) => [key, extraction.field_provenance[key]]))
       setEvent({
         ...emptyEvent,
         ...fields,
@@ -112,12 +144,16 @@ export function AdminImportPage({ manual = false }) {
         end_time: fields.end_time || '',
         source_url: fields.source_url || url,
         extraction_status: 'extracted',
-        extraction_metadata: { extracted_field_count: extraction.extracted_field_count, extracted_at: extraction.extracted_at, warnings: extraction.warnings || [] },
+        extraction_metadata: { extracted_field_count: extraction.extracted_field_count, extracted_at: extraction.extracted_at, warnings: extraction.warnings || [], research: extraction.research || null },
         extracted_at: extraction.extracted_at,
         missing_fields: extraction.missing_fields || [],
-        field_provenance: Object.fromEntries(Object.entries(fields).filter(([, value]) => value != null && value !== '' && (!Array.isArray(value) || value.length > 0)).map(([key]) => [key, 'extracted'])),
+        registration_status: fields.registration_status || 'not_announced',
+        field_provenance: {
+          ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value != null && value !== '' && (!Array.isArray(value) || value.length > 0)).map(([key]) => [key, 'extracted'])),
+          ...decided,
+        },
       })
-      setResult(extraction)
+      setResult({ ...extraction, duplicate: extraction.duplicates?.[0] || extraction.duplicate || null })
       setImageFailed(false)
     } catch (err) {
       setError(`${err.message} You can still create a draft by entering the event details below.`)
@@ -128,11 +164,10 @@ export function AdminImportPage({ manual = false }) {
     }
   }
 
-  async function save(status) {
+  async function save(status, { allowDuplicate = duplicateConfirmed } = {}) {
     await runSingleSubmission(submissionLock, async () => {
       if (saving || busy) return
       setError('')
-      setSuccess('')
       if (Object.values(invalidTimes).some(Boolean)) {
         setError('Correct the highlighted time fields before saving.')
         return
@@ -164,24 +199,42 @@ export function AdminImportPage({ manual = false }) {
           speakers: event.speakers,
           agenda_items: event.agenda_items,
         }
-        const saved = draftId
-          ? await adminApi.updateEvent(draftId, payload)
-          : await adminApi.createEvent(payload)
+        const confirmDuplicate = (duplicates) => showDuplicateToast(duplicates, {
+          onProceed: () => { setDuplicateConfirmed(true); save(status, { allowDuplicate: true }) },
+          proceedLabel: status === 'published' ? 'Not a duplicate — publish anyway' : 'Not a duplicate — save anyway',
+        })
+        let saved
+        try {
+          saved = draftId
+            ? await adminApi.updateEvent(draftId, payload)
+            : await adminApi.createEvent(payload, { allowDuplicate })
+        } catch (err) {
+          if (!isDuplicateError(err)) throw err
+          confirmDuplicate(err.duplicates)
+          return
+        }
         if (!draftId) setDraftId(saved.id)
         if (status === 'published') {
           let published
           try {
-            published = await adminApi.publishEvent(saved.id)
+            published = await adminApi.publishEvent(saved.id, { allowDuplicate })
           } catch (err) {
+            if (isDuplicateError(err)) {
+              setError('Saved as a draft. It was not published because a matching event is already live.')
+              confirmDuplicate(err.duplicates)
+              return
+            }
             setError(`Draft saved, but it could not be published: ${err.message}. Your details are still here; try again after resolving the issue.`)
             return
           }
-          setSuccess(`${published.name} is now published. You can add another event.`)
+          toast.success(`${published.name} is now published. You can add another event.`)
+          setDuplicateConfirmed(false)
           setUrl('')
           setDraftId(null)
           setEvent(manual ? blankManualEvent() : emptyEvent)
           setResult(manual ? { mode: 'manual', fields: {}, missing_fields: [], extracted_field_count: 0, extracted_at: null } : null)
           setError('')
+          setDuplicateConfirmed(false)
           setInvalidTimes({})
           setTimeInputGeneration((generation) => generation + 1)
           setImageFailed(false)
@@ -211,7 +264,7 @@ export function AdminImportPage({ manual = false }) {
         <label htmlFor="source-url"><Link2 size={16} /> EVENT PAGE URL</label>
         <div><input id="source-url" type="url" placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} required disabled={busy || saving} /><button className="admin-primary-button" disabled={busy || saving || !url.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <ArrowRight size={15} />}{busy ? 'Fetching details…' : 'Fetch event details'}</button></div>
         <p>Public event pages only. Retrieved details are reviewable before publishing; sites that block access can still be entered manually.</p>
-        <button className="manual-entry-link" type="button" onClick={() => { setResult({ mode: 'manual', fields: {}, missing_fields: [], extracted_field_count: 0, extracted_at: null }); setEvent(blankManualEvent()); setInvalidTimes({}); setTimeInputGeneration((generation) => generation + 1); setError('') }}>Or start with a blank event record</button>
+        <button className="manual-entry-link" type="button" onClick={() => { setDuplicateConfirmed(false); setResult({ mode: 'manual', fields: {}, missing_fields: [], extracted_field_count: 0, extracted_at: null }); setEvent(blankManualEvent()); setInvalidTimes({}); setTimeInputGeneration((generation) => generation + 1); setError('') }}>Or start with a blank event record</button>
         {url && <div className="source-preview">
           <div className="source-preview-mark"><ExternalLink size={17} /></div>
           <div className="source-preview-copy"><strong>{sourceHostname(url)}</strong><span>{url}</span></div>
@@ -219,16 +272,15 @@ export function AdminImportPage({ manual = false }) {
         </div>}
       </form>
 
-      {success && <div className="admin-success" role="status"><Check size={15} />{success}</div>}
       {error && <div className="admin-alert" role="alert">{error}</div>}
-      {result && <div className="extraction-summary"><span className="extraction-check"><Check size={13} /></span>{result.mode === 'unavailable' ? <strong>Extraction unavailable · enter event details manually</strong> : result.mode === 'manual' ? <strong>Manual entry · all fields are editable</strong> : <><strong>{result.extracted_field_count || 0} fields extracted</strong><span>·</span><span>{event.missing_fields?.length || 0} fields need attention</span></>}{result.duplicate && <span className="duplicate-note">Possible match: <Link to={`/admin/events/${result.duplicate.id}/edit`}>{result.duplicate.name}</Link></span>}{result.warnings?.length > 0 && <ul className="extraction-warnings" aria-label="Extraction warnings">{result.warnings.map(({ field, message }) => <li key={field}>{message}</li>)}</ul>}</div>}
+      {result && <div className="extraction-summary"><span className="extraction-check"><Check size={13} /></span>{result.mode === 'unavailable' ? <strong>Extraction unavailable · enter event details manually</strong> : result.mode === 'duplicate' ? <strong>Already in The Orbit · not imported again</strong> : result.mode === 'manual' ? <strong>Manual entry · all fields are editable</strong> : <><strong>{result.extracted_field_count || 0} fields extracted</strong><span>·</span><span>{event.missing_fields?.length || 0} fields need attention</span></>}{result.duplicate && <span className="duplicate-note">Possible match: <Link to={`/admin/events/${result.duplicate.id}/edit`}>{result.duplicate.name}</Link></span>}{result.warnings?.length > 0 && <ul className="extraction-warnings" aria-label="Extraction warnings">{result.warnings.map(({ field, message }) => <li key={field}>{message}</li>)}</ul>}</div>}
 
       {(result || url) && <div className="admin-form-layout">
         <form className="event-edit-form" onSubmit={(e) => e.preventDefault()}>
           <section className="form-section"><SectionHead letter="A" title="Basic information" status={fieldStatus('name')} /><div className="form-grid">
             <Field label="Event name" required><input value={event.name} onChange={(e) => update('name', e.target.value)} /></Field>
             <Field label="URL slug" required><input value={event.slug} onChange={(e) => update('slug', slugify(e.target.value))} /></Field>
-            <Field label="Event type"><input value={event.event_type || ''} onChange={(e) => update('event_type', e.target.value)} placeholder="Meetup, workshop, hackathon…" /></Field>
+            <Field label="Event type"><select value={event.event_type || ''} onChange={(e) => update('event_type', e.target.value)}><option value="">Choose a type…</option>{eventTypeOptions(event.event_type).map((type) => <option key={type} value={type}>{type}</option>)}</select><FieldOrigin field="event_type" provenance={event.field_provenance?.event_type} /></Field>
             <Field label="Technology tags"><input value={(event.tags || []).join(', ')} onChange={(e) => update('tags', e.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="React, AI, design systems" /></Field>
             <Field label="Description" className="field-full"><textarea rows="5" value={event.description || ''} onChange={(e) => update('description', e.target.value)} /></Field>
           </div></section>
@@ -265,14 +317,14 @@ export function AdminImportPage({ manual = false }) {
             <Field label="Amount"><input type="number" min="0" step="0.01" value={event.registration_amount || ''} onChange={(e) => update('registration_amount', e.target.value)} /></Field>
             <Field label="Currency"><input value={event.registration_currency || ''} onChange={(e) => update('registration_currency', e.target.value)} placeholder="USD" /></Field>
             <Field label="Deadline"><input type="datetime-local" value={isoToZonedInput(event.registration_deadline, event.timezone)} onChange={(e) => update('registration_deadline', e.target.value)} /></Field>
-            <Field label="Status"><input value={event.registration_status || ''} onChange={(e) => update('registration_status', e.target.value)} placeholder="Open, waitlist…" /></Field>
+            <Field label="Registration status"><select value={registrationStatusSelectValue(event.registration_status)} onChange={(e) => update('registration_status', e.target.value)}>{registrationStatusOptions(event.registration_status).map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select><FieldOrigin field="registration_status" provenance={event.field_provenance?.registration_status} /></Field>
           </div></section>
 
           <section className="form-section"><SectionHead letter="I" title="Media" status={fieldStatus('banner_url')} /><div className="form-grid">
             <Field label="Original banner URL" className="field-full"><input type="url" value={event.original_banner_url || ''} onChange={(e) => update('original_banner_url', e.target.value)} /></Field>
             <Field label="Banner image URL to display" className="field-full"><input type="url" value={event.banner_url || ''} onChange={(e) => { update('banner_url', e.target.value); setImageFailed(false) }} /></Field>
           </div>
-          {event.banner_url && <div className="banner-preview">{imageFailed ? <div><ImagePlus size={19} /><span>Preview unavailable. Check the image URL.</span></div> : <img src={event.banner_url} alt="Event banner preview" decoding="async" onError={() => setImageFailed(true)} />}<button type="button" onClick={() => update('banner_url', '')}><Trash2 size={13} /> Remove image</button></div>}
+          {event.banner_url && <div className="banner-preview">{imageFailed ? <div><ImagePlus size={19} /><span>Preview unavailable. Check the image URL.</span></div> : <img src={event.banner_url} alt="Event banner preview" decoding="async" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} />}<button type="button" onClick={() => update('banner_url', '')}><Trash2 size={13} /> Remove image</button></div>}
           </section>
 
           <section className="form-section"><SectionHead letter="J" title="Source & verification" status={event.verification_status === 'verified' ? 'Verified' : 'Needs review'} /><div className="form-grid">
@@ -285,7 +337,7 @@ export function AdminImportPage({ manual = false }) {
         <aside className="event-form-aside">
           <div className="event-form-sticky">
             <span className="admin-eyebrow">PUBLIC PREVIEW</span>
-            {event.banner_url && !imageFailed ? <img className="aside-banner" src={event.banner_url} alt="" decoding="async" onError={() => setImageFailed(true)} /> : <div className="aside-banner aside-banner-empty"><ImagePlus size={20} /><span>Event image</span></div>}
+            {event.banner_url && !imageFailed ? <img className="aside-banner" src={event.banner_url} alt="" decoding="async" referrerPolicy="no-referrer" onError={() => setImageFailed(true)} /> : <div className="aside-banner aside-banner-empty"><ImagePlus size={20} /><span>Event image</span></div>}
             <h3>{event.name || 'Your event title'}</h3>
             <p>{event.start_date || 'Date to be confirmed'}{event.start_time ? ` · ${format12HourTime(event.start_time)}` : ''}</p>
             <p>{event.event_type || 'Event type'}{event.organizer_name ? ` · ${event.organizer_name}` : ''}</p>
@@ -296,9 +348,9 @@ export function AdminImportPage({ manual = false }) {
             <Checklist label="Start time" complete={Boolean(event.start_time)} />
             <Checklist label="Source URL" complete={Boolean(event.source_url)} />
             <div className="form-action-stack">
-              <button className="admin-preview-button" type="button" disabled={!event.name.trim()} onClick={() => setPreviewOpen(true)}>Preview event <ArrowUpRight size={14} /></button>
-              <button className="admin-primary-button" disabled={saving || busy || !event.name.trim() || !event.slug} onClick={() => save('draft')}>{saving ? 'Saving…' : 'Save draft'} <ArrowRight size={14} /></button>
-              <button className="admin-secondary-button" disabled={saving || busy || !event.name.trim() || !event.start_date || !event.timezone} onClick={() => save('published')}>{saving ? 'Publishing…' : 'Publish event'} <ArrowUpRight size={14} /></button>
+              <button className="admin-preview-button" type="button" disabled={!event.name.trim()} onClick={() => setPreviewOpen(true)}>Preview event <ArrowUpRight size={15} /></button>
+              <button className="admin-primary-button" disabled={saving || busy || !event.name.trim() || !event.slug} onClick={() => save('draft')}>{saving ? 'Saving…' : 'Save draft'} <ArrowRight size={15} /></button>
+              <button className="admin-secondary-button" disabled={saving || busy || !event.name.trim() || !event.start_date || !event.timezone} onClick={() => save('published')}>{saving ? 'Publishing…' : 'Publish event'} <ArrowUpRight size={15} /></button>
             </div>
             <p className="publish-note">{!event.start_date ? 'Publishing requires a start date. Fill in the missing event details first.' : `Event times use ${INDIA_TIME_ZONE}. You can edit or unpublish this event at any time.`}</p>
           </div>
@@ -326,10 +378,10 @@ function PreviewModal({ event, onClose }) {
     <div className="event-preview-overlay" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <section className="event-preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title">
         <div className="event-preview-top"><span className="admin-eyebrow">PUBLIC EVENT PREVIEW</span><button type="button" onClick={onClose} aria-label="Close preview">×</button></div>
-        {event.banner_url && <img className="event-preview-banner" src={event.banner_url} alt="" loading="lazy" decoding="async" />}
+        {event.banner_url && <img className="event-preview-banner" src={event.banner_url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />}
         <p className="section-eyebrow"><span className="kicker-line" />{event.event_type || 'COMMUNITY EVENT'}</p>
         <h2 id="preview-title">{event.name || 'Your event title'}</h2>
-        <div className="event-preview-facts"><span>{event.start_date || 'Date to be confirmed'}{event.start_time ? ` · ${format12HourTime(event.start_time)}` : ' · Time to be confirmed'}</span>{event.organizer_name && <span>Organized by {event.organizer_name}</span>}{(event.venue_name || event.city) && <span>{[event.venue_name, event.city].filter(Boolean).join(', ')}</span>}</div>
+        <div className="event-preview-facts"><span>{registrationStatusInfo(event.registration_status).label}</span><span>{event.start_date || 'Date to be confirmed'}{event.start_time ? ` · ${format12HourTime(event.start_time)}` : ' · Time to be confirmed'}</span>{event.organizer_name && <span>Organized by {event.organizer_name}</span>}{(event.venue_name || event.city) && <span>{[event.venue_name, event.city].filter(Boolean).join(', ')}</span>}</div>
         {event.description && <div className="event-preview-description">{event.description}</div>}
         <button className="admin-primary-button" type="button" onClick={onClose}>Back to editing</button>
       </section>

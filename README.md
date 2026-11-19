@@ -103,8 +103,6 @@ The frontend community page (`/community`) reads these optional build-time varia
 
 | Variable | Destination |
 | --- | --- |
-| `VITE_ORBIT_WHATSAPP_URL` | The Orbit WhatsApp community invite |
-| `VITE_ORBIT_LINKEDIN_URL` | The Orbit LinkedIn page |
 | `VITE_ORBIT_INSTAGRAM_URL` | The Orbit Instagram profile |
 
 The one-shot job purges only events deleted more than 30 days ago and attempts the next due monthly report. Daily invocation retries failed reports after their retry time and catches up missed months one period at a time; a successful monthly delivery advances the database schedule. Confirm that the selected hosting plan supports scheduled commands and configure the job to alert on non-zero exit status. Running `npm run jobs:run` locally is a one-time invocation, not a persistent scheduler.

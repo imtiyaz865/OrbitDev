@@ -1,6 +1,9 @@
 import { load } from 'cheerio'
-import { researchedEventFields, researchEventDetails } from './geminiResearch.js'
+import { pageText, researchedEventFields, researchEventDetails } from './geminiResearch.js'
 import { safeFetchPage } from './safeFetch.js'
+import { normalizeEventType } from './eventType.js'
+import { finalizeImport } from './importReview.js'
+import { registrationStatusFromPage } from './registrationStatus.js'
 
 const text = (value) => typeof value === 'string' && value.trim() ? value.trim() : null
 const defaultGeminiModel = 'gemini-3.8-flash'
@@ -231,6 +234,10 @@ export function parseEventHtml(html, sourceUrl, finalUrl = sourceUrl) {
   )
   const start = parseEventDate(startValue, sourceTimezone)
   const end = parseEventDate(endValue, sourceTimezone)
+  // A start time with an explicit UTC offset is an exact instant, so converting it to
+  // Asia/Kolkata is unambiguous even when the page names no timezone.
+  const exactStartInstant = Boolean(start.startAt) && /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(startValue || '').trim())
+  const timezoneResolved = sourceTimezone ? sourceTimezone === eventTimezone : exactStartInstant
   const timezone = eventTimezone
   const banner = text(image) || getMeta($, ['og:image', 'twitter:image'])
   const performers = Array.isArray(jsonLd?.performer) ? jsonLd.performer : jsonLd?.performer ? [jsonLd.performer] : []
@@ -261,11 +268,12 @@ export function parseEventHtml(html, sourceUrl, finalUrl = sourceUrl) {
     !start.time && 'start_time',
     !end.date && 'end_date',
     !end.time && 'end_time',
-    (!sourceTimezone || sourceTimezone !== eventTimezone) && 'timezone',
+    !timezoneResolved && 'timezone',
     !description && 'description',
     !registrationUrl && 'registration_url',
     !banner && 'banner_url',
   ].filter(Boolean)
+  const sourceEventType = normalizeEventType(scalar(jsonLd?.eventType) || scalar(jsonLd?.category) || scalar(jsonLd?.['@type']))
   const fields = {
     name: title,
     description,
@@ -276,7 +284,8 @@ export function parseEventHtml(html, sourceUrl, finalUrl = sourceUrl) {
     end_date: end.date,
     end_time: end.time,
     timezone,
-    event_type: scalar(jsonLd?.eventType) || scalar(jsonLd?.category),
+    // schema.org types such as "BusinessEvent" are mapped onto the product vocabulary or dropped.
+    event_type: sourceEventType,
     attendance_mode: /online/i.test(jsonLd?.eventAttendanceMode || '')
       ? 'online'
       : /mixed/i.test(jsonLd?.eventAttendanceMode || '')
@@ -296,7 +305,8 @@ export function parseEventHtml(html, sourceUrl, finalUrl = sourceUrl) {
     registration_amount: Number.isFinite(price) ? price : null,
     registration_currency: text(offer?.priceCurrency),
     registration_deadline: normalizeDate(offer?.validThrough || offer?.availabilityEnds),
-    registration_status: text(offer?.availability)?.split('/').pop() || null,
+    // Decided in finalizeImport from page labels, metadata and the deadline; never guessed here.
+    registration_status: null,
     banner_url: banner,
     original_banner_url: banner,
     source_url: sourceUrl,
@@ -323,14 +333,23 @@ export function parseEventHtml(html, sourceUrl, finalUrl = sourceUrl) {
   })
   if (!end.date) warnings.push({ field: 'end_date', message: endValue ? 'The event end date on the page could not be parsed; enter it manually.' : 'No event end date was found on the page.' })
   if (!end.time) warnings.push({ field: 'end_time', message: end.date ? 'No event end time was found; enter it manually if known.' : 'No event end time was found on the page.' })
-  if (!sourceTimezone) warnings.push({ field: 'timezone', message: 'No source timezone was found. The event is set to Asia/Kolkata by default; confirm its date and time against the source before publishing.' })
+  if (!sourceTimezone && !exactStartInstant) warnings.push({ field: 'timezone', message: 'No source timezone was found. The event is set to Asia/Kolkata by default; confirm its date and time against the source before publishing.' })
   else if (sourceTimezone !== eventTimezone) warnings.push({ field: 'timezone', message: `The source time in ${sourceTimezone} was converted to Asia/Kolkata. Confirm the converted event date and time.` })
   return {
     fields,
+    // Evidence for decisions taken in finalizeImport; removed before the result leaves the server.
+    signals: {
+      registration_page: registrationStatusFromPage($),
+      registration_metadata: text(offer?.availability),
+      page_text: pageText(html),
+    },
     field_provenance: {
+      ...(sourceEventType ? { event_type: { method: 'source_metadata', source_url: finalUrl } } : {}),
       timezone: sourceTimezone
         ? { method: 'source_metadata', source_url: finalUrl }
-        : { method: 'default', timezone: eventTimezone },
+        : exactStartInstant
+          ? { method: 'source_offset', source_url: finalUrl }
+          : { method: 'default', timezone: eventTimezone },
     },
     missing_fields: missingFields,
     warnings,
@@ -390,7 +409,15 @@ function mergeResearchResult(extraction, research, sourceUrl, finalUrl) {
   const missing = new Set(extraction.missing_fields)
   const requiredFields = new Set(['start_date', 'start_time', 'timezone'])
 
+  // Event type and registration status are decided in finalizeImport, weighing the
+  // model's reading against page labels and metadata, so they are not merged here.
+  const signals = {
+    ...extraction.signals,
+    ai_event_type: research.fields.event_type || null,
+    ai_registration_status: research.fields.registration_status || null,
+  }
   for (const field of researchedEventFields) {
+    if (field === 'event_type' || field === 'registration_status') continue
     const value = research.fields[field]
     if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) continue
     if (['organizer_website', 'registration_url', 'banner_url'].includes(field)) {
@@ -451,6 +478,7 @@ function mergeResearchResult(extraction, research, sourceUrl, finalUrl) {
   const sourceUrls = new Set([sourceUrl, finalUrl, ...research.source_urls])
   return {
     ...extraction,
+    signals,
     fields,
     missing_fields: [...missing],
     warnings,
@@ -469,15 +497,17 @@ function mergeResearchResult(extraction, research, sourceUrl, finalUrl) {
 export async function extractEventFromUrl(sourceUrl, { research = researchEventDetails, fetchPage = safeFetchPage } = {}) {
   const { html, finalUrl } = await fetchPage(sourceUrl)
   const extraction = parseEventHtml(html, sourceUrl, finalUrl)
+  let enhanced
   try {
-    const enhanced = await research({ html, sourceUrl, finalUrl, existingFields: extraction.fields })
-    return mergeResearchResult(extraction, enhanced, sourceUrl, finalUrl)
+    enhanced = await research({ html, sourceUrl, finalUrl, existingFields: extraction.fields })
   } catch (error) {
     console.warn('Gemini event research unavailable; continuing with page metadata only.', safeGeminiError(error))
-    return {
+    // Gemini is optional: the import continues with page metadata only.
+    return finalizeImport({
       ...extraction,
       research: { status: 'unavailable', model: process.env.GEMINI_MODEL?.trim() || defaultGeminiModel, source_urls: [sourceUrl, finalUrl] },
       warnings: [...extraction.warnings, { field: 'research', message: 'AI research is unavailable. This import uses only public page metadata.' }],
-    }
+    })
   }
+  return finalizeImport(mergeResearchResult(extraction, enhanced, sourceUrl, finalUrl), enhanced.analysis)
 }

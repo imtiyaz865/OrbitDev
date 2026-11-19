@@ -3,6 +3,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowUpRight, CalendarRange, LayoutDashboard, LogOut, Moon, Settings, Sun, Ticket, X } from 'lucide-react'
 import { getSupabaseClient } from '../../services/supabase.js'
 import { useTheme } from '../../hooks/ThemeContext.jsx'
+import { ToastContainer } from 'react-toastify'
+import 'react-toastify/dist/ReactToastify.css'
 import '../../styles/admin.css'
 import { useSeo } from '../../seo/useSeo.js'
 
@@ -81,10 +83,11 @@ export function AdminLayout() {
         <header className="admin-topbar">
           <button ref={mobileMenuRef} className="admin-mobile-menu" onClick={() => setMobileOpen((open) => !open)} aria-label={mobileOpen ? 'Close navigation menu' : 'Open navigation menu'} aria-controls="admin-navigation" aria-expanded={mobileOpen}><span /><span /></button>
           <span className="admin-breadcrumb">{location.pathname.includes('/weekly-update') ? 'WEEKLY UPDATE' : location.pathname.includes('/events') ? 'EVENTS' : location.pathname.includes('/settings') ? 'SETTINGS' : 'OVERVIEW'}</span>
-          <a className="admin-topbar-public" href="/" target="_blank" rel="noreferrer">View public site <ArrowUpRight size={13} /></a>
+          <a className="admin-topbar-public" href="/" target="_blank" rel="noreferrer">View public site <ArrowUpRight size={14} /></a>
         </header>
         <div className="admin-content"><Outlet /></div>
       </div>
+      <ToastContainer position="top-right" theme={theme === 'dark' ? 'dark' : 'light'} newestOnTop limit={4} pauseOnFocusLoss={false} />
     </div>
   )
 }

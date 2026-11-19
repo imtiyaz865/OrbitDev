@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/utils/weekends.test.js src/utils/singleSubmission.test.js src/utils/times.test.js src/utils/weeklyUpdate.test.js"
+    "test": "node --test src/utils/weekends.test.js src/utils/singleSubmission.test.js src/utils/times.test.js src/utils/weeklyUpdate.test.js src/utils/showcase.test.js src/utils/eventType.test.js src/utils/imageUrl.test.js src/utils/pagination.test.js src/utils/registrationStatus.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
@@ -15,7 +15,8 @@
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.18.4"
+    "react-router-dom": "^7.18.4",
+    "react-toastify": "^11.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

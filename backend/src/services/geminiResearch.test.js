@@ -174,3 +174,97 @@ test('conflicting researched required dates remain unresolved instead of silentl
   assert.ok(extraction.missing_fields.includes('start_date'))
   assert.ok(extraction.warnings.some(({ field }) => field === 'start_date'))
 })
+
+function analysisResponse(fields, evidenceFields, analysis) {
+  const text = JSON.stringify({
+    fields: { ...emptyFields(), ...fields },
+    evidence: evidenceFields.map((field) => ({ field, source_url: request.sourceUrl })),
+    analysis,
+  })
+  return { output_text: text }
+}
+
+const workshopPage = {
+  ...request,
+  html: '<html><body><h1>Kubernetes Workshop</h1><p>A hands-on session on Kubernetes and Helm for platform teams.</p></body></html>',
+  existingFields: { name: 'Kubernetes Workshop', description: 'A hands-on session on Kubernetes and Helm for platform teams.' },
+}
+
+test('Gemini classification, tags and analysis are validated against the vocabulary and the page', async () => {
+  const result = await researchEventDetails(workshopPage, {
+    env,
+    createClient: () => ({ interactions: { create: async (params) => {
+      assert.ok(params.response_format.schema.properties.analysis)
+      assert.ok(params.response_format.schema.properties.fields.properties.event_type.enum.includes('Workshop'))
+      return analysisResponse(
+        { event_type: 'workshop', tags: ['Kubernetes', 'Helm', 'Terraform', 'kubernetes'] },
+        ['event_type', 'tags'],
+        { formatted_description: 'A hands-on session on Kubernetes and Helm\nfor platform teams.', review_flags: [{ field: 'start_time', kind: 'missing', message: 'No start time is given.' }] },
+      )
+    } } }),
+  })
+  assert.equal(result.fields.event_type, 'Workshop')
+  assert.deepEqual(result.fields.tags, ['Kubernetes', 'Helm'], 'unmentioned and duplicate tags are dropped')
+  assert.equal(result.analysis.review_flags.length, 1)
+  assert.match(result.analysis.formatted_description, /Helm\nfor platform/)
+})
+
+test('event types outside the vocabulary are dropped, and analysis is optional', async () => {
+  const result = await researchEventDetails(workshopPage, {
+    env,
+    createClient: () => ({ interactions: { create: async () => analysisResponse({ event_type: 'Concert' }, ['event_type']) } }),
+  })
+  assert.equal(result.fields.event_type, undefined)
+  assert.deepEqual(result.analysis, { formatted_description: null, review_flags: [] })
+})
+
+test('malformed analysis output is rejected instead of trusted', async () => {
+  await assert.rejects(researchEventDetails(workshopPage, {
+    env,
+    createClient: () => ({ interactions: { create: async () => analysisResponse({}, [], { formatted_description: null, review_flags: [{ field: 'start_date', kind: 'guess', message: 'x' }] }) } }),
+  }), /did not match the supported schema/)
+  await assert.rejects(researchEventDetails(workshopPage, {
+    env,
+    createClient: () => ({ interactions: { create: async () => analysisResponse({}, [], { formatted_description: null, review_flags: [], extra: true }) } }),
+  }), /did not match the supported schema/)
+})
+
+const exactEventPage = '<script type="application/ld+json">{"@type":"Event","name":"Rust Hyderabad Meetup","description":"Talks on async Rust. Starts 10:00 AM sharp.","startDate":"2099-02-07T10:00:00+05:30","endDate":"2099-02-07T13:00:00+05:30"}</script>'
+
+test('imports apply validated AI analysis, keep the original description and start verified when complete', async () => {
+  const extraction = await extractEventFromUrl(request.sourceUrl, {
+    fetchPage: async () => ({ html: exactEventPage, finalUrl: request.finalUrl }),
+    research: async () => ({
+      status: 'completed', model: 'test-model', fields: { tags: ['Rust'] }, field_provenance: {}, source_urls: [],
+      analysis: { formatted_description: 'Talks on async Rust.\n\nStarts 10:00 AM sharp.', review_flags: [] },
+    }),
+  })
+  assert.equal(extraction.fields.description, 'Talks on async Rust.\n\nStarts 10:00 AM sharp.')
+  assert.equal(extraction.research.original_description, 'Talks on async Rust. Starts 10:00 AM sharp.')
+  assert.equal(extraction.fields.event_type, 'Meetup')
+  assert.deepEqual(extraction.fields.tags, ['Rust'])
+  assert.equal(extraction.missing_fields.includes('timezone'), false, 'an explicit UTC offset resolves the timezone')
+  assert.equal(extraction.fields.verification_status, 'verified')
+})
+
+test('imports still work and verify from page metadata when Gemini fails or returns date flags', async () => {
+  const failed = await extractEventFromUrl(request.sourceUrl, {
+    fetchPage: async () => ({ html: exactEventPage, finalUrl: request.finalUrl }),
+    research: async () => { throw new Error('Gemini returned malformed structured output.') },
+  })
+  assert.equal(failed.research.status, 'unavailable')
+  assert.equal(failed.fields.name, 'Rust Hyderabad Meetup')
+  assert.equal(failed.fields.event_type, 'Meetup')
+  assert.equal(failed.fields.description, 'Talks on async Rust. Starts 10:00 AM sharp.')
+  assert.equal(failed.fields.verification_status, 'verified')
+
+  const flagged = await extractEventFromUrl(request.sourceUrl, {
+    fetchPage: async () => ({ html: exactEventPage, finalUrl: request.finalUrl }),
+    research: async () => ({
+      status: 'completed', model: 'test-model', fields: {}, field_provenance: {}, source_urls: [],
+      analysis: { formatted_description: null, review_flags: [{ field: 'start_time', kind: 'date_time', message: 'Description says 10:30 AM.' }] },
+    }),
+  })
+  assert.equal(flagged.fields.verification_status, 'needs_review')
+  assert.ok(flagged.missing_fields.includes('start_time'))
+})

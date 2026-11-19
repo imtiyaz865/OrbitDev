@@ -1,8 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, Image as ImageIcon, Plus, Trash2 } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { TimeField } from '../../components/TimeField.jsx'
 import { adminApi } from '../../services/adminApi.js'
+import { runSingleSubmission } from '../../utils/singleSubmission.js'
+import { classifyEventType, eventTypeOptions } from '../../utils/eventType.js'
+import { registrationStatusOptions, registrationStatusSelectValue } from '../../utils/registrationStatus.js'
+import { toast } from 'react-toastify'
+import { isDuplicateError, showDuplicateToast } from './duplicateToast.jsx'
+import { FieldOrigin } from './FieldOrigin.jsx'
+
+const TYPE_SIGNAL_KEYS = new Set(['name', 'description', 'agenda_items', 'attendance_mode'])
+// Existing database values; the select keeps any other stored value as an extra option.
+const VERIFICATION_OPTIONS = [['needs_review', 'Needs review'], ['verified', 'Verified'], ['unverified', 'Unverified']]
 import { AdminImportPage } from './AdminImportPage.jsx'
 import { Status } from './AdminDashboardPage.jsx'
 import { isoToZonedInput, zonedDateTimeToIso } from '../../utils/weekends.js'
@@ -78,34 +88,93 @@ function normalizeEventTimezone(event) {
   }
 }
 
+// Bookkeeping fields the form rewrites on every keystroke; they do not count as user edits.
+const untrackedKeys = new Set(['missing_fields', 'field_provenance', 'extraction_metadata', 'updated_at'])
+
+function editableSnapshot(event) {
+  if (!event) return ''
+  return JSON.stringify(Object.keys(event).sort().filter((key) => !untrackedKeys.has(key)).map((key) => [key, event[key] ?? null]))
+}
+
+const leaveMessage = 'You have unsaved changes to this event. Leave without saving?'
+
+/**
+ * Warns before leaving with unsaved edits: page reloads/closes (beforeunload) and
+ * in-app link clicks (sidebar, back link). The app uses <BrowserRouter>, so React
+ * Router's useBlocker is unavailable; browser Back/Forward is not intercepted.
+ */
+function useUnsavedChangesGuard(active) {
+  useEffect(() => {
+    if (!active) return undefined
+    function onBeforeUnload(unloadEvent) {
+      unloadEvent.preventDefault()
+      unloadEvent.returnValue = ''
+    }
+    function onClick(clickEvent) {
+      if (clickEvent.defaultPrevented || clickEvent.button !== 0 || clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey) return
+      const anchor = clickEvent.target instanceof Element ? clickEvent.target.closest('a[href]') : null
+      if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return
+      const destination = new URL(anchor.href, window.location.href)
+      if (destination.origin !== window.location.origin) return
+      if (destination.pathname === window.location.pathname && destination.search === window.location.search) return
+      if (!window.confirm(leaveMessage)) {
+        clickEvent.preventDefault()
+        clickEvent.stopPropagation()
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    document.addEventListener('click', onClick, true)
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      document.removeEventListener('click', onClick, true)
+    }
+  }, [active])
+}
+
 export function AdminEventEditorPage() {
   const { id } = useParams()
   const [event, setEvent] = useState(null)
+  const [savedEvent, setSavedEvent] = useState(null)
   const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState('')
+  const [bannerFailed, setBannerFailed] = useState(false)
   const [invalidTimes, setInvalidTimes] = useState({})
+  const submissionLock = useRef(false)
   const isNew = id === 'new'
 
   useEffect(() => {
     if (isNew) {
       setEvent(null)
+      setSavedEvent(null)
       return
     }
     setInvalidTimes({})
+    setBannerFailed(false)
     adminApi.getEvent(id).then((record) => {
-      setEvent(normalizeEventTimezone(record))
+      const normalized = normalizeEventTimezone(record)
+      setEvent(normalized)
+      setSavedEvent(normalized)
     }).catch((err) => setError(err.message))
   }, [id, isNew])
 
+  const savedSnapshot = useMemo(() => editableSnapshot(savedEvent), [savedEvent])
+  const currentSnapshot = useMemo(() => editableSnapshot(event), [event])
+  const dirty = Boolean(event && savedEvent) && currentSnapshot !== savedSnapshot
+  useUnsavedChangesGuard(dirty)
+
   if (isNew) return <AdminImportPage manual />
-  if (error) return <div className="admin-page"><div className="admin-alert">{error}</div><Link to="/admin/events" className="admin-inline-link">Back to events</Link></div>
+  if (error && !event) return <div className="admin-page"><div className="admin-alert">{error}</div><Link to="/admin/events" className="admin-inline-link">Back to events</Link></div>
   if (!event) return <div className="admin-loading">Loading event record…</div>
 
+  // Offered (never applied silently) for existing events that have no type yet.
+  const suggestedType = event.event_type ? null : classifyEventType(event)
+
   function updateField(key, value) {
+    if (key === 'banner_url') setBannerFailed(false)
     const missingFields = new Set(event.missing_fields || [])
     if (value == null || value === '') missingFields.add(key)
     else missingFields.delete(key)
-    setEvent({
+    const next = {
       ...event,
       [key]: value,
       missing_fields: [...missingFields],
@@ -116,7 +185,16 @@ export function AdminEventEditorPage() {
         ...event.field_provenance,
         [key]: event.field_provenance?.[key] ? 'manually_edited' : 'manual',
       },
-    })
+    }
+    if (key === 'verification_status') next.last_verified_at = value === 'verified' ? new Date().toISOString() : null
+    // Keep suggesting an event type from the title/description/agenda until the administrator sets one.
+    if (TYPE_SIGNAL_KEYS.has(key) && (!event.event_type || event.field_provenance?.event_type === 'suggested')) {
+      const suggested = classifyEventType(next)
+      next.event_type = suggested || ''
+      if (suggested) next.field_provenance.event_type = 'suggested'
+      else delete next.field_provenance.event_type
+    }
+    setEvent(next)
   }
   async function persistChanges() {
     if (Object.values(invalidTimes).some(Boolean)) {
@@ -141,25 +219,57 @@ export function AdminEventEditorPage() {
             : null
         : null,
     })
-    setEvent(updated)
-    return updated
+    const normalized = normalizeEventTimezone(updated)
+    setEvent(normalized)
+    setSavedEvent(normalized)
+    return normalized
   }
-  async function save() {
-    setBusy(true); setError('')
-    try { await persistChanges() } catch (err) { setError(err.message) } finally { setBusy(false) }
+  // One action at a time: the ref lock stops a fast double click from sending twice
+  // before the disabled state renders.
+  function runAction(kind, task) {
+    return runSingleSubmission(submissionLock, async () => {
+      setBusy(kind); setError('')
+      try { await task() } catch (err) { setError(err.message) } finally { setBusy('') }
+    })
   }
-  async function togglePublish() {
-    setBusy(true); setError('')
-    try {
-      let updated
-      if (event.status === 'published') {
-        updated = await adminApi.unpublishEvent(id)
-      } else {
-        await persistChanges()
-        updated = await adminApi.publishEvent(id)
+  function save() {
+    return runAction('save', async () => {
+      await persistChanges()
+      toast.success(event.status === 'published' ? 'Changes saved and live on the public site.' : 'Changes saved.')
+    })
+  }
+  function togglePublish() {
+    if (event.status === 'published') {
+      return runAction('unpublish', async () => {
+        const hadUnsavedEdits = dirty
+        const updated = normalizeEventTimezone(await adminApi.unpublishEvent(id))
+        // Only the publication status changed on the server; keep any unsaved edits in the form.
+        setSavedEvent(updated)
+        setEvent((current) => ({ ...current, status: updated.status, updated_at: updated.updated_at }))
+        toast.success(hadUnsavedEdits
+          ? 'Event unpublished. Your unsaved edits are still in the form; save to keep them.'
+          : 'Event unpublished. It is no longer on the public site.')
+      })
+    }
+    return publish()
+  }
+  // A matching live event blocks publishing until the administrator confirms it is a different event.
+  function publish(allowDuplicate = false) {
+    return runAction('publish', async () => {
+      await persistChanges()
+      let record
+      try {
+        record = await adminApi.publishEvent(id, { allowDuplicate })
+      } catch (err) {
+        if (!isDuplicateError(err)) throw err
+        showDuplicateToast(err.duplicates, { onProceed: () => publish(true), proceedLabel: 'Not a duplicate — publish anyway' })
+        return
       }
-      setEvent(updated)
-    } catch (err) { setError(err.message) } finally { setBusy(false) }
+      const published = normalizeEventTimezone(record)
+      setEvent(published)
+      setSavedEvent(published)
+      toast.success('Event published and live on the public site.')
+    })
   }
 
   return (
@@ -169,9 +279,10 @@ export function AdminEventEditorPage() {
       {error && <div className="admin-alert" role="alert">{error}</div>}
       <div className="editor-action-bar">
         <div>
-          {event.status === 'published' && <a className="admin-secondary-button" href={`/events/${event.slug}`} target="_blank" rel="noreferrer">View event <ArrowUpRight size={14} /></a>}
-          <button className="admin-secondary-button" type="button" onClick={togglePublish} disabled={busy}>{event.status === 'published' ? 'Unpublish' : 'Publish'} <ArrowUpRight size={14} /></button>
-          <button className="admin-primary-button" type="button" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
+          {dirty && <span className="form-data-state is-missing editor-unsaved">Unsaved changes</span>}
+          {event.status === 'published' && <a className="admin-secondary-button" href={`/events/${event.slug}`} target="_blank" rel="noreferrer">View event <ArrowUpRight size={15} /></a>}
+          <button className="admin-secondary-button" type="button" onClick={togglePublish} disabled={Boolean(busy)}>{busy === 'publish' ? 'Publishing…' : busy === 'unpublish' ? 'Unpublishing…' : event.status === 'published' ? 'Unpublish' : 'Publish'} <ArrowUpRight size={15} /></button>
+          <button className="admin-primary-button" type="button" onClick={save} disabled={Boolean(busy)}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button>
         </div>
       </div>
       <form className="admin-edit-fields editor-form" onSubmit={(submitEvent) => submitEvent.preventDefault()}>
@@ -192,9 +303,9 @@ export function AdminEventEditorPage() {
           </div>
           <div className="editor-banner-field">
             <label className="admin-field">Banner image URL<input type="url" value={event.banner_url || ''} onChange={(inputEvent) => updateField('banner_url', inputEvent.target.value)} /></label>
-            {event.banner_url
-              ? <img className="editor-banner-preview" src={event.banner_url} alt={`${event.name || 'Event'} banner preview`} decoding="async" onError={(imageEvent) => { imageEvent.currentTarget.hidden = true }} />
-              : <div className="editor-banner-empty"><ImageIcon size={18} /><span>Banner preview</span></div>}
+            {event.banner_url && !bannerFailed
+              ? <img key={event.banner_url} className="editor-banner-preview" src={event.banner_url} referrerPolicy="no-referrer" alt={`${event.name || 'Event'} banner preview`} decoding="async" onError={() => setBannerFailed(true)} />
+              : <div className="editor-banner-empty"><ImageIcon size={18} /><span>{bannerFailed ? 'Preview unavailable. Check the image URL.' : 'Banner preview'}</span></div>}
           </div>
         </section>
 
@@ -208,7 +319,12 @@ export function AdminEventEditorPage() {
             <label className="admin-field">Fee type<input value={event.registration_fee_type || ''} onChange={(inputEvent) => updateField('registration_fee_type', inputEvent.target.value)} /></label>
             <label className="admin-field">Fee amount<input type="number" min="0" step="any" value={event.registration_amount ?? ''} onChange={(inputEvent) => updateField('registration_amount', inputEvent.target.value)} /></label>
             <label className="admin-field">Fee currency<input value={event.registration_currency || ''} onChange={(inputEvent) => updateField('registration_currency', inputEvent.target.value)} /></label>
-            <label className="admin-field">Registration status<input value={event.registration_status || ''} onChange={(inputEvent) => updateField('registration_status', inputEvent.target.value)} /></label>
+            <label className="admin-field">Registration status
+              <select value={registrationStatusSelectValue(event.registration_status)} onChange={(inputEvent) => updateField('registration_status', inputEvent.target.value)}>
+                {registrationStatusOptions(event.registration_status).map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <FieldOrigin field="registration_status" provenance={event.field_provenance?.registration_status} />
+            </label>
             <label className="admin-field">Registration deadline<input type="datetime-local" value={isoToZonedInput(event.registration_deadline, event.timezone)} onChange={(inputEvent) => updateField('registration_deadline', inputEvent.target.value)} /></label>
           </div>
         </details>
@@ -221,12 +337,25 @@ export function AdminEventEditorPage() {
           <summary>Additional metadata</summary>
           <div className="editor-disclosure-content editor-field-grid">
             <label className="admin-field">URL slug<input value={event.slug || ''} onChange={(inputEvent) => updateField('slug', inputEvent.target.value)} /></label>
-            <label className="admin-field">Event type<input value={event.event_type || ''} onChange={(inputEvent) => updateField('event_type', inputEvent.target.value)} /></label>
+            <label className="admin-field">Event type
+              <select value={event.event_type || ''} onChange={(inputEvent) => updateField('event_type', inputEvent.target.value)}>
+                <option value="">Choose a type…</option>
+                {eventTypeOptions(event.event_type).map((type) => <option key={type} value={type}>{type}</option>)}
+              </select>
+              <FieldOrigin field="event_type" provenance={event.field_provenance?.event_type} />
+              {!event.event_type && suggestedType && <button type="button" className="admin-inline-link editor-suggestion" onClick={() => updateField('event_type', suggestedType)}>Use suggested type: {suggestedType}</button>}
+            </label>
             <label className="admin-field editor-field-full">Technology tags<input value={Array.isArray(event.tags) ? event.tags.join(', ') : event.tags || ''} onChange={(inputEvent) => updateField('tags', inputEvent.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} /></label>
             <label className="admin-field">Organizer website<input type="url" value={event.organizer_website || ''} onChange={(inputEvent) => updateField('organizer_website', inputEvent.target.value)} /></label>
             <label className="admin-field">Organizer logo URL<input type="url" value={event.organizer_logo_url || ''} onChange={(inputEvent) => updateField('organizer_logo_url', inputEvent.target.value)} /></label>
             <label className="admin-field">Original banner URL<input type="url" value={event.original_banner_url || ''} onChange={(inputEvent) => updateField('original_banner_url', inputEvent.target.value)} /></label>
-            <label className="admin-field">Verification status<input value={event.verification_status || ''} onChange={(inputEvent) => updateField('verification_status', inputEvent.target.value)} /></label>
+            <label className="admin-field">Verification status
+              <select value={event.verification_status || 'needs_review'} onChange={(inputEvent) => updateField('verification_status', inputEvent.target.value)}>
+                {[...new Set([...VERIFICATION_OPTIONS.map(([value]) => value), event.verification_status].filter(Boolean))].map((value) => (
+                  <option key={value} value={value}>{VERIFICATION_OPTIONS.find(([option]) => option === value)?.[1] || value}</option>
+                ))}
+              </select>
+            </label>
           </div>
         </details>
 
